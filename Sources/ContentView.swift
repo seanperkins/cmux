@@ -1369,6 +1369,7 @@ struct ContentView: View {
     @State private var commandPaletteResultsRevision: UInt64 = 0
     @State private var commandPaletteUsageHistoryByCommandId: [String: CommandPaletteUsageEntry] = [:]
     @State private var isFeedbackComposerPresented = false
+    @State private var isAgentDashboardPresented = false
     @AppStorage(CommandPaletteRenameSelectionSettings.selectAllOnFocusKey)
     private var commandPaletteRenameSelectAllOnFocus = CommandPaletteRenameSelectionSettings.defaultSelectAllOnFocus
     @AppStorage(CommandPaletteSwitcherSearchSettings.searchAllSurfacesKey)
@@ -2645,6 +2646,22 @@ struct ContentView: View {
         view = AnyView(view.ignoresSafeArea())
         view = AnyView(view.sheet(isPresented: $isFeedbackComposerPresented) {
             SidebarFeedbackComposerSheet()
+        })
+
+        view = AnyView(view.overlay {
+            if isAgentDashboardPresented {
+                Color.black.opacity(0.3)
+                    .ignoresSafeArea()
+                    .onTapGesture { isAgentDashboardPresented = false }
+                    .overlay {
+                        AgentDashboardView(
+                            tabManager: tabManager,
+                            isPresented: $isAgentDashboardPresented
+                        )
+                    }
+                    .transition(.opacity)
+                    .onExitCommand { isAgentDashboardPresented = false }
+            }
         })
 
         view = AnyView(view.onDisappear {
@@ -4548,6 +4565,8 @@ struct ContentView: View {
             return .toggleSplitZoom
         case "palette.triggerFlash":
             return .triggerFlash
+        case "palette.agentDashboard":
+            return .agentDashboard
         default:
             return nil
         }
@@ -4814,6 +4833,14 @@ struct ContentView: View {
                 title: constant(String(localized: "command.showNotifications.title", defaultValue: "Show Notifications")),
                 subtitle: constant(String(localized: "command.showNotifications.subtitle", defaultValue: "Notifications")),
                 keywords: ["notifications", "inbox"]
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.agentDashboard",
+                title: constant(String(localized: "command.agentDashboard.title", defaultValue: "Agent Dashboard")),
+                subtitle: constant(String(localized: "command.agentDashboard.subtitle", defaultValue: "Agents")),
+                keywords: ["agent", "dashboard", "status", "overview"]
             )
         )
         contributions.append(
@@ -5425,6 +5452,9 @@ struct ContentView: View {
         }
         registry.register(commandId: "palette.showNotifications") {
             AppDelegate.shared?.toggleNotificationsPopover(animated: false)
+        }
+        registry.register(commandId: "palette.agentDashboard") {
+            isAgentDashboardPresented.toggle()
         }
         registry.register(commandId: "palette.jumpUnread") {
             AppDelegate.shared?.jumpToLatestUnread()
@@ -10358,6 +10388,61 @@ private struct TabItemView: View, Equatable {
                     .multilineTextAlignment(.leading)
             }
 
+            // Breadcrumb trail
+            if let breadcrumb = tab.breadcrumb, !breadcrumb.crumbs.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 2) {
+                        ForEach(Array(breadcrumb.crumbs.enumerated()), id: \.offset) { idx, crumb in
+                            if idx > 0 {
+                                Text("→")
+                                    .font(.system(size: 8))
+                                    .foregroundColor(activeSecondaryColor(0.3))
+                            }
+                            Text(crumb)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(activeSecondaryColor(0.6))
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            // Rearview mirror
+            if let rearview = tab.rearview, !rearview.entries.isEmpty {
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(Array(rearview.entries.enumerated()), id: \.offset) { _, entry in
+                        HStack(spacing: 4) {
+                            Text(entry.icon)
+                                .font(.system(size: 9))
+                            Text(entry.text)
+                                .font(.system(size: 9))
+                                .foregroundColor(activeSecondaryColor(0.7))
+                            Spacer()
+                            Text(entry.relativeTime)
+                                .font(.system(size: 8))
+                                .foregroundColor(activeSecondaryColor(0.4))
+                        }
+                    }
+                }
+            }
+
+            // Activity waveform
+            if let waveform = tab.waveform {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(waveform.sparkline)
+                        .font(.system(size: 8, design: .monospaced))
+                        .foregroundColor(activeSecondaryColor(0.7))
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                    if let label = waveform.label {
+                        Text(label)
+                            .font(.system(size: 9))
+                            .foregroundColor(activeSecondaryColor(0.5))
+                            .lineLimit(1)
+                    }
+                }
+            }
+
             if detailVisibility.showsMetadata {
                 let metadataEntries = tab.sidebarStatusEntriesInDisplayOrder()
                 let metadataBlocks = tab.sidebarMetadataBlocksInDisplayOrder()
@@ -10408,11 +10493,19 @@ private struct TabItemView: View, Equatable {
                     }
                     .frame(height: 3)
 
-                    if let label = progress.label {
-                        Text(label)
-                            .font(.system(size: 9))
-                            .foregroundColor(activeSecondaryColor(0.6))
-                            .lineLimit(1)
+                    HStack {
+                        if let label = progress.label {
+                            Text(label)
+                                .font(.system(size: 9))
+                                .foregroundColor(activeSecondaryColor(0.6))
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        if let eta = progress.etaLabel {
+                            Text(eta)
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(activeSecondaryColor(0.5))
+                        }
                     }
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))

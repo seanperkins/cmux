@@ -1598,6 +1598,42 @@ class TerminalController {
         case "clear_progress":
             return clearProgress(args)
 
+        case "set_color":
+            return setWorkspaceColor(args)
+
+        case "clear_color":
+            return clearWorkspaceColor(args)
+
+        case "set_waveform":
+            return setWaveform(args)
+
+        case "clear_waveform":
+            return clearWaveform(args)
+
+        case "set_breadcrumb":
+            return setBreadcrumb(args)
+
+        case "clear_breadcrumb":
+            return clearBreadcrumb(args)
+
+        case "set_rearview":
+            return setRearview(args)
+
+        case "clear_rearview":
+            return clearRearview(args)
+
+        case "queue_add":
+            return queueAdd(args)
+
+        case "queue_remove":
+            return queueRemove(args)
+
+        case "queue_list":
+            return queueList(args)
+
+        case "queue_clear":
+            return queueClear(args)
+
         case "report_git_branch":
             return reportGitBranch(args)
 
@@ -13440,7 +13476,7 @@ class TerminalController {
             guard Self.shouldReplaceProgress(current: tab.progress, value: clamped, label: label) else {
                 return
             }
-            tab.progress = SidebarProgressState(value: clamped, label: label)
+            tab.updateProgress(value: clamped, label: label)
         }
         return result
     }
@@ -13453,10 +13489,206 @@ class TerminalController {
                 return
             }
             if tab.progress != nil {
-                tab.progress = nil
+                tab.clearProgress()
             }
         }
         return result
+    }
+
+    // MARK: - Workspace Color
+
+    private func setWorkspaceColor(_ args: String) -> String {
+        let parsed = parseOptions(args)
+        guard let color = parsed.positional.first, !color.isEmpty else {
+            return "ERROR: set_color requires a hex color argument (e.g. #22c55e)"
+        }
+        var result = "OK"
+        DispatchQueue.main.async {
+            guard let tab = self.resolveTabForReport(args) else { return }
+            tab.setCustomColor(color)
+        }
+        return result
+    }
+
+    private func clearWorkspaceColor(_ args: String) -> String {
+        DispatchQueue.main.async {
+            guard let tab = self.resolveTabForReport(args) else { return }
+            tab.setCustomColor(nil)
+        }
+        return "OK"
+    }
+
+    // MARK: - Waveform
+
+    private func setWaveform(_ args: String) -> String {
+        let parsed = parseOptions(args)
+        guard let bucketsStr = parsed.positional.first, !bucketsStr.isEmpty else {
+            return "ERROR: set_waveform requires comma-separated bucket values"
+        }
+        let buckets = bucketsStr.split(separator: ",").compactMap { Int($0) }
+        guard !buckets.isEmpty else {
+            return "ERROR: Invalid bucket values"
+        }
+        let label = parsed.options["label"]
+        DispatchQueue.main.async {
+            guard let tab = self.resolveTabForReport(args) else { return }
+            tab.waveform = SidebarWaveformState(buckets: buckets, label: label, timestamp: Date())
+        }
+        return "OK"
+    }
+
+    private func clearWaveform(_ args: String) -> String {
+        DispatchQueue.main.async {
+            guard let tab = self.resolveTabForReport(args) else { return }
+            tab.waveform = nil
+        }
+        return "OK"
+    }
+
+    // MARK: - Breadcrumb
+
+    private func setBreadcrumb(_ args: String) -> String {
+        let parsed = parseOptions(args)
+        let crumbStr = parsed.positional.joined(separator: " ")
+        guard !crumbStr.isEmpty else {
+            return "ERROR: set_breadcrumb requires a breadcrumb trail"
+        }
+        let crumbs = crumbStr.components(separatedBy: " → ")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !crumbs.isEmpty else {
+            return "ERROR: No valid breadcrumbs found"
+        }
+        DispatchQueue.main.async {
+            guard let tab = self.resolveTabForReport(args) else { return }
+            tab.breadcrumb = SidebarBreadcrumbState(crumbs: crumbs, timestamp: Date())
+        }
+        return "OK"
+    }
+
+    private func clearBreadcrumb(_ args: String) -> String {
+        DispatchQueue.main.async {
+            guard let tab = self.resolveTabForReport(args) else { return }
+            tab.breadcrumb = nil
+        }
+        return "OK"
+    }
+
+    // MARK: - Rearview
+
+    private func setRearview(_ args: String) -> String {
+        let parsed = parseOptions(args)
+        let raw = parsed.positional.joined(separator: " ")
+        guard !raw.isEmpty else {
+            return "ERROR: set_rearview requires entries in format: icon text|time,icon text|time"
+        }
+        let entries = raw.split(separator: ",").compactMap { part -> SidebarRearviewEntry? in
+            let components = part.split(separator: "|", maxSplits: 1)
+            guard components.count == 2 else { return nil }
+            let text = components[0].trimmingCharacters(in: .whitespaces)
+            let time = components[1].trimmingCharacters(in: .whitespaces)
+            guard !text.isEmpty else { return nil }
+            let icon = String(text.prefix(1))
+            let rest = String(text.dropFirst()).trimmingCharacters(in: .whitespaces)
+            return SidebarRearviewEntry(icon: icon, text: rest, relativeTime: time)
+        }
+        guard !entries.isEmpty else {
+            return "ERROR: No valid rearview entries parsed"
+        }
+        DispatchQueue.main.async {
+            guard let tab = self.resolveTabForReport(args) else { return }
+            tab.rearview = SidebarRearviewState(entries: entries, timestamp: Date())
+        }
+        return "OK"
+    }
+
+    private func clearRearview(_ args: String) -> String {
+        DispatchQueue.main.async {
+            guard let tab = self.resolveTabForReport(args) else { return }
+            tab.rearview = nil
+        }
+        return "OK"
+    }
+
+    // MARK: - Task Queue
+
+    private func queueAdd(_ args: String) -> String {
+        let parsed = parseOptions(args)
+        let prompt = parsed.positional.joined(separator: " ")
+        guard !prompt.isEmpty else {
+            return "ERROR: queue_add requires a task prompt"
+        }
+        let queueURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cmux/queue.json")
+        var tasks = loadQueueTasks(from: queueURL)
+        let nextId = (tasks.map(\.id).max() ?? 0) + 1
+        tasks.append(QueueTask(id: nextId, prompt: prompt, status: "queued", workspace: nil))
+        saveQueueTasks(tasks, to: queueURL)
+        return "OK"
+    }
+
+    private func queueRemove(_ args: String) -> String {
+        let parsed = parseOptions(args)
+        guard let idStr = parsed.positional.first, let id = Int(idStr) else {
+            return "ERROR: queue_remove requires a task ID"
+        }
+        let queueURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cmux/queue.json")
+        var tasks = loadQueueTasks(from: queueURL)
+        tasks.removeAll { $0.id == id }
+        saveQueueTasks(tasks, to: queueURL)
+        return "OK"
+    }
+
+    private func queueList(_ args: String) -> String {
+        let queueURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cmux/queue.json")
+        let tasks = loadQueueTasks(from: queueURL)
+        guard !tasks.isEmpty else { return "Queue is empty" }
+        return tasks.map { task in
+            let icon: String
+            switch task.status {
+            case "running": icon = "🔄"
+            case "completed": icon = "✅"
+            case "failed": icon = "❌"
+            default: icon = "⏳"
+            }
+            var line = "#\(task.id) \(icon) \(task.status) | \(task.prompt)"
+            if let ws = task.workspace { line += " (\(ws))" }
+            return line
+        }.joined(separator: "\n")
+    }
+
+    private func queueClear(_ args: String) -> String {
+        let queueURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cmux/queue.json")
+        saveQueueTasks([], to: queueURL)
+        return "OK"
+    }
+
+    private struct QueueTask: Codable {
+        let id: Int
+        var prompt: String
+        var status: String
+        var workspace: String?
+    }
+
+    private struct QueueContainer: Codable {
+        var tasks: [QueueTask]
+    }
+
+    private func loadQueueTasks(from url: URL) -> [QueueTask] {
+        guard let data = try? Data(contentsOf: url),
+              let container = try? JSONDecoder().decode(QueueContainer.self, from: data) else {
+            return []
+        }
+        return container.tasks
+    }
+
+    private func saveQueueTasks(_ tasks: [QueueTask], to url: URL) {
+        let container = QueueContainer(tasks: tasks)
+        guard let data = try? JSONEncoder().encode(container) else { return }
+        try? data.write(to: url, options: .atomic)
     }
 
     private func reportGitBranch(_ args: String) -> String {
@@ -14081,9 +14313,29 @@ class TerminalController {
 
             if let progress = tab.progress {
                 let label = progress.label ?? ""
-                lines.append("progress=\(String(format: "%.2f", progress.value)) \(label)".trimmingCharacters(in: .whitespaces))
+                var progressLine = "progress=\(String(format: "%.2f", progress.value)) \(label)".trimmingCharacters(in: .whitespaces)
+                if let eta = progress.etaLabel {
+                    progressLine += " (\(eta))"
+                }
+                lines.append(progressLine)
             } else {
                 lines.append("progress=none")
+            }
+
+            if let waveform = tab.waveform {
+                lines.append("waveform=\(waveform.sparkline)")
+                if let label = waveform.label {
+                    lines.append("waveform_label=\(label)")
+                }
+            }
+
+            if let breadcrumb = tab.breadcrumb {
+                lines.append("breadcrumb_trail=\(breadcrumb.crumbs.joined(separator: " → "))")
+            }
+
+            if let rearview = tab.rearview {
+                let mirror = rearview.entries.map { "\($0.icon) \($0.text) \($0.relativeTime)" }.joined(separator: " · ")
+                lines.append("rearview=\(mirror)")
             }
 
             let statusEntries = tab.sidebarStatusEntriesInDisplayOrder()

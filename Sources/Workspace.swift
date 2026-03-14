@@ -628,6 +628,68 @@ struct SidebarLogEntry {
 struct SidebarProgressState {
     let value: Double
     let label: String?
+    let startTime: Date
+    let lastUpdateTime: Date
+
+    init(value: Double, label: String?, startTime: Date = Date(), lastUpdateTime: Date = Date()) {
+        self.value = value
+        self.label = label
+        self.startTime = startTime
+        self.lastUpdateTime = lastUpdateTime
+    }
+
+    var estimatedSecondsRemaining: Int? {
+        guard value > 0.05 else { return nil }
+        let elapsed = lastUpdateTime.timeIntervalSince(startTime)
+        guard elapsed > 2 else { return nil }
+        let rate = value / elapsed
+        guard rate > 0 else { return nil }
+        let remaining = (1.0 - value) / rate
+        let seconds = Int(remaining)
+        guard seconds > 0, seconds < 3600 else { return nil }
+        return seconds
+    }
+
+    var etaLabel: String? {
+        guard let secs = estimatedSecondsRemaining else { return nil }
+        if secs < 60 { return "~\(secs)s left" }
+        let mins = secs / 60
+        return "~\(mins)m left"
+    }
+}
+
+struct SidebarWaveformState {
+    let buckets: [Int]
+    let label: String?
+    let timestamp: Date
+
+    private static let sparkChars: [Character] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+
+    var sparkline: String {
+        guard let maxVal = buckets.max(), maxVal > 0 else {
+            return String(repeating: "▁", count: buckets.count)
+        }
+        return String(buckets.map { count in
+            let idx = maxVal > 0 ? min(Int(Double(count) / Double(maxVal) * 7.0), 7) : 0
+            return Self.sparkChars[idx]
+        })
+    }
+}
+
+struct SidebarBreadcrumbState {
+    let crumbs: [String]
+    let timestamp: Date
+}
+
+struct SidebarRearviewEntry {
+    let icon: String
+    let text: String
+    let relativeTime: String
+}
+
+struct SidebarRearviewState {
+    let entries: [SidebarRearviewEntry]
+    let timestamp: Date
 }
 
 struct SidebarGitBranchState {
@@ -989,6 +1051,10 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var metadataBlocks: [String: SidebarMetadataBlock] = [:]
     @Published var logEntries: [SidebarLogEntry] = []
     @Published var progress: SidebarProgressState?
+    @Published var waveform: SidebarWaveformState?
+    @Published var breadcrumb: SidebarBreadcrumbState?
+    @Published var rearview: SidebarRearviewState?
+    private var progressStartTime: Date?
     @Published var gitBranch: SidebarGitBranchState?
     @Published var panelGitBranches: [UUID: SidebarGitBranchState] = [:]
     @Published var pullRequest: SidebarPullRequestState?
@@ -1650,6 +1716,26 @@ final class Workspace: Identifiable, ObservableObject {
         } else {
             customColor = nil
         }
+    }
+
+    func updateProgress(value: Double, label: String?) {
+        let now = Date()
+        if progress == nil || value < (progress?.value ?? 0) || value < 0.01 {
+            progressStartTime = now
+        }
+        let startTime = progressStartTime ?? now
+        progressStartTime = startTime
+        progress = SidebarProgressState(
+            value: value,
+            label: label,
+            startTime: startTime,
+            lastUpdateTime: now
+        )
+    }
+
+    func clearProgress() {
+        progress = nil
+        progressStartTime = nil
     }
 
     func setCustomTitle(_ title: String?) {
