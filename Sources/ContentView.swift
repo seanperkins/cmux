@@ -6,7 +6,7 @@ import ObjectiveC
 import UniformTypeIdentifiers
 import WebKit
 
-private extension Color {
+extension Color {
     init?(hex: String) {
         let hex = hex.trimmingCharacters(in: .init(charactersIn: "#"))
         guard hex.count == 6, let value = UInt64(hex, radix: 16) else { return nil }
