@@ -1334,7 +1334,7 @@ struct FilePreviewPanelView: View {
                         label: panel.isDirty
                             ? String(localized: "filePreview.openMarkdownPreview.savefirst", defaultValue: "Save before opening preview")
                             : String(localized: "filePreview.openMarkdownPreview", defaultValue: "Open Preview"),
-                        isDisabled: panel.isDirty || panel.isSaving,
+                        isDisabled: panel.isDirty || panel.isSaving || panel.isFileUnavailable,
                         action: {
                             let fileURL = panel.fileURL
                             guard let workspace = panel.owningWorkspace(),
