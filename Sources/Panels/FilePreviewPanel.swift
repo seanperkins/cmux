@@ -995,6 +995,7 @@ final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPan
     @Published private(set) var displayIcon: String?
     @Published private(set) var isFileUnavailable = false
     @Published private(set) var textContent = ""
+    @Published private(set) var textContentUTF8ByteCount = 0
     @Published private(set) var isDirty = false
     @Published private(set) var isSaving = false
     @Published private(set) var focusFlashToken = 0
@@ -1148,8 +1149,13 @@ final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPan
 
     func updateTextContent(_ nextContent: String) {
         guard textContent != nextContent else { return }
-        textContent = nextContent
+        setTextContent(nextContent)
         isDirty = nextContent != originalTextContent
+    }
+
+    private func setTextContent(_ nextContent: String) {
+        textContent = nextContent
+        textContentUTF8ByteCount = nextContent.utf8.count
     }
 
     private func prepareContentForPreviewMode() {
@@ -1207,7 +1213,7 @@ final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPan
                 isFileUnavailable = true
                 return
             }
-            textContent = ""
+            setTextContent("")
             originalTextContent = ""
             isDirty = false
             isFileUnavailable = true
@@ -1219,7 +1225,7 @@ final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPan
                 isFileUnavailable = false
                 return
             }
-            textContent = content
+            setTextContent(content)
             originalTextContent = content
             textEncoding = encoding
             isDirty = false
@@ -1233,7 +1239,7 @@ final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPan
         guard !isSaving else { return nil }
         let currentContent = textInsertionTarget?.filePreviewCurrentText ?? textContent
         guard currentContent != originalTextContent else {
-            textContent = currentContent
+            setTextContent(currentContent)
             isDirty = false
             return nil
         }
@@ -1241,7 +1247,7 @@ final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPan
         textLoadGeneration += 1
         saveGeneration += 1
         let generation = saveGeneration
-        textContent = currentContent
+        setTextContent(currentContent)
         isSaving = true
         activeSaveGeneration = generation
         let fileURL = fileURL
