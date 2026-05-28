@@ -313,7 +313,11 @@ extension HighlightedEditorBridge: TextViewCoordinator {
         MainActor.assumeIsolated {
             guard !isCoordinatorDestroyed() else { return }
             textController = controller
-            installLocalEventMonitor(scrollView: controller.scrollView)
+            // CodeEditSourceEditor calls prepareCoordinator during the controller's
+            // init, before loadView, so scrollView (an IUO) may still be nil here.
+            if let scrollView = controller.scrollView {
+                installLocalEventMonitor(scrollView: scrollView)
+            }
         }
     }
 
@@ -399,13 +403,29 @@ struct HighlightedSourceEditorCore: View {
                 theme: makeSyntaxTheme(),
                 font: .monospacedSystemFont(ofSize: bridge.fontSize, weight: .regular),
                 wrapLines: false
+            ),
+            // A read-only file preview needs neither the minimap nor the folding
+            // ribbon. Hiding the minimap also keeps MinimapView.setTheme (which
+            // calls NSColor.brightnessComponent) off the hot path; the colors are
+            // sRGB-normalized in makeSyntaxTheme as the actual safety net. Note the
+            // folding ribbon being hidden does NOT stop fold *calculation* — the
+            // LineFoldCalculator range trap is fixed in the package itself.
+            peripherals: .init(
+                showMinimap: false,
+                showFoldingRibbon: false
             )
         )
     }
 
     private func makeSyntaxTheme() -> EditorTheme {
-        let fg = bridge.themeForeground
-        let bg = bridge.drawsBackground ? bridge.themeBackground : .clear
+        // CodeEditSourceEditor (e.g. MinimapView.setTheme) calls
+        // NSColor.brightnessComponent on theme.background, which throws for any
+        // color not in an RGB-compatible colorspace (catalog colors and .clear).
+        // Normalize to sRGB up front so every derived color is safe.
+        let fg = (bridge.themeForeground.usingColorSpace(.sRGB)) ?? bridge.themeForeground
+        let bg = bridge.drawsBackground
+            ? ((bridge.themeBackground.usingColorSpace(.sRGB)) ?? bridge.themeBackground)
+            : NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0)
         // Always derive light/dark from the actual theme background, never from the
         // resolved clear color, otherwise transparent dark terminals would get the
         // light syntax palette.
