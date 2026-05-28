@@ -17,6 +17,19 @@ import SwiftUI
 // The bridge also implements TextViewCoordinator to register the TextView with
 // FilePreviewFocusCoordinator (keyboard focus) and manage the zoom event monitor.
 
+/// Runs `body` on the main actor. CodeEditSourceEditor's coordinator callbacks
+/// are declared `nonisolated` but documented to fire on the main thread. This
+/// runs synchronously in that (normal) case, and falls back to an async hop
+/// rather than trapping — as bare `MainActor.assumeIsolated` would — if a future
+/// library version ever invokes them off the main thread.
+private func runOnMainActor(_ body: @MainActor @escaping () -> Void) {
+    if Thread.isMainThread {
+        MainActor.assumeIsolated(body)
+    } else {
+        DispatchQueue.main.async { MainActor.assumeIsolated(body) }
+    }
+}
+
 @MainActor
 final class HighlightedEditorBridge: NSObject, @preconcurrency NSTextStorageDelegate, ObservableObject {
     static let defaultFontSize: CGFloat = 13
@@ -310,7 +323,7 @@ private extension NSColor {
 
 extension HighlightedEditorBridge: TextViewCoordinator {
     nonisolated func prepareCoordinator(controller: TextViewController) {
-        MainActor.assumeIsolated {
+        runOnMainActor { [self] in
             guard !isCoordinatorDestroyed() else { return }
             textController = controller
             // CodeEditSourceEditor calls prepareCoordinator during the controller's
@@ -337,7 +350,7 @@ extension HighlightedEditorBridge: TextViewCoordinator {
 
 extension HighlightedEditorBridge: TextViewDelegate {
     nonisolated func textView(_ textView: TextView, didReplaceContentsIn range: NSRange, with string: String) {
-        MainActor.assumeIsolated {
+        runOnMainActor { [self] in
             applyUserEditedText(textView.string)
         }
     }
@@ -352,10 +365,20 @@ final class HighlightedEditorContainerView: NSView {
     var hostView: NSHostingView<HighlightedSourceEditorCore>?
 
     private let bridge: HighlightedEditorBridge
+    // Tracks the language currently driving the SwiftUI core so updateNSView can
+    // rebuild the hosting view when the same surface is reused for a file of a
+    // different language (otherwise the new file keeps the old highlighter).
+    private var currentLanguageID: TreeSitterLanguage?
 
     init(bridge: HighlightedEditorBridge) {
         self.bridge = bridge
         super.init(frame: .zero)
+    }
+
+    func setLanguageIfNeeded(_ language: CodeLanguage) {
+        guard currentLanguageID != language.id else { return }
+        currentLanguageID = language.id
+        hostView?.rootView = HighlightedSourceEditorCore(bridge: bridge, language: language)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -501,6 +524,7 @@ struct HighlightedFilePreviewEditor: NSViewRepresentable {
         let hostView = NSHostingView(rootView: HighlightedSourceEditorCore(bridge: bridge, language: language))
         container.addSubview(hostView)
         container.hostView = hostView
+        container.setLanguageIfNeeded(language)
 
         bridge.setContent(panel.textContent)
         return container
@@ -511,6 +535,9 @@ struct HighlightedFilePreviewEditor: NSViewRepresentable {
         container.isHidden = !isVisibleInUI
         bridge.setVisibleInUI(isVisibleInUI)
         bridge.panel = panel
+        // Rebuild the SwiftUI core if the surface is now showing a different
+        // language; the language is otherwise captured once at makeNSView time.
+        container.setLanguageIfNeeded(language)
         bridge.setContent(panel.textContent)
         bridge.updateThemeIfNeeded(background: themeBackgroundColor, foreground: themeForegroundColor, drawsBackground: drawsBackground)
     }
