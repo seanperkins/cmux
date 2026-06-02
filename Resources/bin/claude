@@ -6,16 +6,32 @@
 # so that Claude Code hooks fire back into cmux for notifications/status.
 # Outside cmux, it passes through to the real claude binary unchanged.
 
-# Find the real claude binary, skipping our own directory.
+# Detect whether a path is itself a cmux claude wrapper (any build version).
+# Resolving REAL_CLAUDE to another wrapper causes wrapper<->wrapper exec
+# ping-pong: each hop appends --settings/--session-id to argv until it
+# overflows ARG_MAX and execve fails with E2BIG ("Argument list too long").
+# This happens whenever more than one cmux bin dir is on PATH (e.g. a STAGING
+# terminal that also has the installed /Applications/cmux.app bin on PATH),
+# because each wrapper previously skipped only its own directory.
+# The marker comment below has been on line 2 of every wrapper build, so a
+# header scan reliably identifies wrappers we must not recurse into.
+is_cmux_claude_wrapper() {
+    local path="$1"
+    [[ -f "$path" && -r "$path" ]] || return 1
+    head -c 4096 "$path" 2>/dev/null | grep -q 'cmux claude wrapper'
+}
+
+# Find the real claude binary, skipping our own directory and any other cmux
+# claude wrapper on PATH.
 find_real_claude() {
     # Honor custom path from Settings > Automation > Claude Code > Claude Binary Path.
-    # Guard against self-reference (user pointing back to this wrapper).
+    # Guard against self-reference (user pointing back to this or another wrapper).
     local custom="${CMUX_CUSTOM_CLAUDE_PATH:-}"
     custom="${custom#"${custom%%[![:space:]]*}"}"  # trim leading whitespace
     custom="${custom%"${custom##*[![:space:]]}"}"  # trim trailing whitespace
     if [[ -n "$custom" && -f "$custom" && -x "$custom" ]]; then
         # Use -ef to detect same underlying file even through symlinks
-        if [[ ! "$custom" -ef "$0" ]]; then
+        if [[ ! "$custom" -ef "$0" ]] && ! is_cmux_claude_wrapper "$custom"; then
             printf '%s' "$custom"
             return 0
         fi
@@ -25,7 +41,9 @@ find_real_claude() {
     local IFS=:
     for d in $PATH; do
         [[ "$d" == "$self_dir" ]] && continue
-        [[ -x "$d/claude" ]] && printf '%s' "$d/claude" && return 0
+        [[ -x "$d/claude" ]] || continue
+        is_cmux_claude_wrapper "$d/claude" && continue
+        printf '%s' "$d/claude" && return 0
     done
     return 1
 }
