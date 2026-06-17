@@ -1,5 +1,13 @@
 import XCTest
 import AppKit
+// Selective imports: the app target also defines AppIconMode/StoredShortcut/etc.,
+// so a blanket `import CmuxSettings` here makes those names ambiguous. Import only
+// the settings symbols this file needs.
+import struct CmuxSettings.AppCatalogSection
+import struct CmuxSettings.QuitConfirmationStore
+import enum CmuxSettings.ConfirmQuitMode
+import enum CmuxSettings.BrowserSearchEngine
+import struct CmuxSettings.BrowserSearchSettingsStore
 
 #if canImport(cmux_DEV)
 @testable import cmux_DEV
@@ -482,6 +490,50 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
         }
     }
 
+    func testSettingsFileParsesFileEditorWordWrap() throws {
+        let defaults = UserDefaults.standard
+
+        try preservingDefaults(keys: [
+            FilePreviewWordWrapSettings.key,
+            settingsFileBackupsDefaultsKey,
+            importedManagedDefaultsKey
+        ]) {
+            defaults.removeObject(forKey: FilePreviewWordWrapSettings.key)
+            defaults.removeObject(forKey: settingsFileBackupsDefaultsKey)
+            defaults.removeObject(forKey: importedManagedDefaultsKey)
+
+            // Defaults to off until the config opts in.
+            XCTAssertFalse(FilePreviewWordWrapSettings.isEnabled(defaults: defaults))
+
+            let directoryURL = try makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directoryURL) }
+
+            let settingsFileURL = directoryURL.appendingPathComponent("cmux.json", isDirectory: false)
+            try writeSettingsFile(
+                """
+                {
+                  "fileEditor": {
+                    "wordWrap": true
+                  }
+                }
+                """,
+                to: settingsFileURL
+            )
+
+            let store = KeyboardShortcutSettingsFileStore(
+                primaryPath: settingsFileURL.path,
+                fallbackPath: nil,
+                additionalFallbackPaths: [],
+                startWatching: false
+            )
+
+            withExtendedLifetime(store) {
+                XCTAssertTrue(defaults.bool(forKey: FilePreviewWordWrapSettings.key))
+                XCTAssertTrue(FilePreviewWordWrapSettings.isEnabled(defaults: defaults))
+            }
+        }
+    }
+
     func testManagedAppearanceUserDefaultSurvivesSettingsFileReapplyUntilFileChanges() throws {
         let defaults = UserDefaults.standard
         let key = AppearanceSettings.appearanceModeKey
@@ -628,7 +680,7 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
 
     func testManagedBoolUserDefaultSurvivesSettingsFileReapplyUntilFileChanges() throws {
         let defaults = UserDefaults.standard
-        let key = QuitWarningSettings.warnBeforeQuitKey
+        let key = AppCatalogSection().warnBeforeQuit.userDefaultsKey
 
         try preservingDefaults(keys: [key, settingsFileBackupsDefaultsKey, importedManagedDefaultsKey]) {
             defaults.removeObject(forKey: key)
@@ -691,7 +743,7 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
 
     func testConfirmQuitImportsEnumFromCmuxJSON() throws {
         let defaults = UserDefaults.standard
-        let key = QuitWarningSettings.confirmQuitKey
+        let key = AppCatalogSection().confirmQuitMode.userDefaultsKey
 
         try preservingDefaults(keys: [key, settingsFileBackupsDefaultsKey, importedManagedDefaultsKey]) {
             defaults.removeObject(forKey: key)
@@ -720,15 +772,15 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
                 startWatching: false
             )
 
-            XCTAssertEqual(defaults.string(forKey: key), QuitConfirmationMode.dirtyOnly.rawValue)
-            XCTAssertEqual(QuitWarningSettings.confirmQuitMode(defaults: defaults), .dirtyOnly)
+            XCTAssertEqual(defaults.string(forKey: key), ConfirmQuitMode.dirtyOnly.rawValue)
+            XCTAssertEqual(QuitConfirmationStore(defaults: defaults).confirmQuitMode, .dirtyOnly)
         }
     }
 
     func testLegacyWarnBeforeQuitMapsToConfirmQuitWhenConfirmQuitIsAbsent() throws {
         let defaults = UserDefaults.standard
-        let confirmQuitKey = QuitWarningSettings.confirmQuitKey
-        let warnBeforeQuitKey = QuitWarningSettings.warnBeforeQuitKey
+        let confirmQuitKey = AppCatalogSection().confirmQuitMode.userDefaultsKey
+        let warnBeforeQuitKey = AppCatalogSection().warnBeforeQuit.userDefaultsKey
 
         try preservingDefaults(keys: [
             confirmQuitKey,
@@ -736,7 +788,7 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
             settingsFileBackupsDefaultsKey,
             importedManagedDefaultsKey,
         ]) {
-            defaults.set(QuitConfirmationMode.always.rawValue, forKey: confirmQuitKey)
+            defaults.set(ConfirmQuitMode.always.rawValue, forKey: confirmQuitKey)
             defaults.removeObject(forKey: warnBeforeQuitKey)
             defaults.removeObject(forKey: settingsFileBackupsDefaultsKey)
             defaults.removeObject(forKey: importedManagedDefaultsKey)
@@ -763,16 +815,16 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
                 startWatching: false
             )
 
-            XCTAssertEqual(defaults.string(forKey: confirmQuitKey), QuitConfirmationMode.never.rawValue)
+            XCTAssertEqual(defaults.string(forKey: confirmQuitKey), ConfirmQuitMode.never.rawValue)
             XCTAssertEqual(defaults.object(forKey: warnBeforeQuitKey) as? Bool, false)
-            XCTAssertEqual(QuitWarningSettings.confirmQuitMode(defaults: defaults), .never)
+            XCTAssertEqual(QuitConfirmationStore(defaults: defaults).confirmQuitMode, .never)
         }
     }
 
     func testLegacyWarnBeforeQuitMigrationPreservesUserOverride() throws {
         let defaults = UserDefaults.standard
-        let confirmQuitKey = QuitWarningSettings.confirmQuitKey
-        let warnBeforeQuitKey = QuitWarningSettings.warnBeforeQuitKey
+        let confirmQuitKey = AppCatalogSection().confirmQuitMode.userDefaultsKey
+        let warnBeforeQuitKey = AppCatalogSection().warnBeforeQuit.userDefaultsKey
 
         try preservingDefaults(keys: [
             confirmQuitKey,
@@ -812,21 +864,21 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
 
             XCTAssertNil(defaults.string(forKey: confirmQuitKey))
             XCTAssertEqual(defaults.object(forKey: warnBeforeQuitKey) as? Bool, true)
-            XCTAssertEqual(QuitWarningSettings.confirmQuitMode(defaults: defaults), .always)
+            XCTAssertEqual(QuitConfirmationStore(defaults: defaults).confirmQuitMode, .always)
 
             try writeSettingsFile("{}", to: settingsFileURL)
             store.reload()
 
             XCTAssertNil(defaults.string(forKey: confirmQuitKey))
             XCTAssertEqual(defaults.object(forKey: warnBeforeQuitKey) as? Bool, true)
-            XCTAssertEqual(QuitWarningSettings.confirmQuitMode(defaults: defaults), .always)
+            XCTAssertEqual(QuitConfirmationStore(defaults: defaults).confirmQuitMode, .always)
         }
     }
 
     func testInvalidConfirmQuitDoesNotAbortRemainingAppSettings() throws {
         let defaults = UserDefaults.standard
-        let confirmQuitKey = QuitWarningSettings.confirmQuitKey
-        let warnBeforeQuitKey = QuitWarningSettings.warnBeforeQuitKey
+        let confirmQuitKey = AppCatalogSection().confirmQuitMode.userDefaultsKey
+        let warnBeforeQuitKey = AppCatalogSection().warnBeforeQuit.userDefaultsKey
 
         try preservingDefaults(keys: [
             confirmQuitKey,
@@ -862,9 +914,9 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
                 startWatching: false
             )
 
-            XCTAssertEqual(defaults.string(forKey: confirmQuitKey), QuitConfirmationMode.never.rawValue)
+            XCTAssertEqual(defaults.string(forKey: confirmQuitKey), ConfirmQuitMode.never.rawValue)
             XCTAssertEqual(defaults.object(forKey: warnBeforeQuitKey) as? Bool, false)
-            XCTAssertEqual(QuitWarningSettings.confirmQuitMode(defaults: defaults), .never)
+            XCTAssertEqual(QuitConfirmationStore(defaults: defaults).confirmQuitMode, .never)
         }
     }
 
@@ -1151,15 +1203,15 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
     func testSettingsFileStoreAppliesCustomBrowserSearchEngine() throws {
         let defaults = UserDefaults.standard
         try preservingDefaults(keys: [
-            BrowserSearchSettings.searchEngineKey,
-            BrowserSearchSettings.customSearchEngineNameKey,
-            BrowserSearchSettings.customSearchEngineURLTemplateKey,
+            BrowserSearchSettingsStore.searchEngineKey,
+            BrowserSearchSettingsStore.customSearchEngineNameKey,
+            BrowserSearchSettingsStore.customSearchEngineURLTemplateKey,
             settingsFileBackupsDefaultsKey,
             importedManagedDefaultsKey,
         ]) {
-            defaults.removeObject(forKey: BrowserSearchSettings.searchEngineKey)
-            defaults.removeObject(forKey: BrowserSearchSettings.customSearchEngineNameKey)
-            defaults.removeObject(forKey: BrowserSearchSettings.customSearchEngineURLTemplateKey)
+            defaults.removeObject(forKey: BrowserSearchSettingsStore.searchEngineKey)
+            defaults.removeObject(forKey: BrowserSearchSettingsStore.customSearchEngineNameKey)
+            defaults.removeObject(forKey: BrowserSearchSettingsStore.customSearchEngineURLTemplateKey)
             defaults.removeObject(forKey: settingsFileBackupsDefaultsKey)
             defaults.removeObject(forKey: importedManagedDefaultsKey)
 
@@ -1187,7 +1239,7 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
                 startWatching: false
             )
 
-            let configuration = BrowserSearchSettings.currentConfiguration(defaults: defaults)
+            let configuration = BrowserSearchSettingsStore(defaults: defaults).currentConfiguration
             let url = try XCTUnwrap(configuration.searchURL(query: "browser settings"))
 
             XCTAssertEqual(configuration.engine, .custom)
@@ -1200,18 +1252,18 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
     func testSettingsFileStoreAppliesBlankCustomBrowserSearchNameAndIgnoresInvalidCustomURLWithoutAbortingBrowserSection() throws {
         let defaults = UserDefaults.standard
         try preservingDefaults(keys: [
-            BrowserSearchSettings.searchEngineKey,
-            BrowserSearchSettings.customSearchEngineNameKey,
-            BrowserSearchSettings.customSearchEngineURLTemplateKey,
-            BrowserSearchSettings.searchSuggestionsEnabledKey,
+            BrowserSearchSettingsStore.searchEngineKey,
+            BrowserSearchSettingsStore.customSearchEngineNameKey,
+            BrowserSearchSettingsStore.customSearchEngineURLTemplateKey,
+            BrowserSearchSettingsStore.searchSuggestionsEnabledKey,
             BrowserThemeSettings.modeKey,
             settingsFileBackupsDefaultsKey,
             importedManagedDefaultsKey,
         ]) {
-            defaults.removeObject(forKey: BrowserSearchSettings.searchEngineKey)
-            defaults.removeObject(forKey: BrowserSearchSettings.customSearchEngineNameKey)
-            defaults.removeObject(forKey: BrowserSearchSettings.customSearchEngineURLTemplateKey)
-            defaults.removeObject(forKey: BrowserSearchSettings.searchSuggestionsEnabledKey)
+            defaults.removeObject(forKey: BrowserSearchSettingsStore.searchEngineKey)
+            defaults.removeObject(forKey: BrowserSearchSettingsStore.customSearchEngineNameKey)
+            defaults.removeObject(forKey: BrowserSearchSettingsStore.customSearchEngineURLTemplateKey)
+            defaults.removeObject(forKey: BrowserSearchSettingsStore.searchSuggestionsEnabledKey)
             defaults.removeObject(forKey: BrowserThemeSettings.modeKey)
             defaults.removeObject(forKey: settingsFileBackupsDefaultsKey)
             defaults.removeObject(forKey: importedManagedDefaultsKey)
@@ -1242,16 +1294,16 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
                 startWatching: false
             )
 
-            XCTAssertEqual(defaults.string(forKey: BrowserSearchSettings.searchEngineKey), BrowserSearchEngine.google.rawValue)
+            XCTAssertEqual(defaults.string(forKey: BrowserSearchSettingsStore.searchEngineKey), BrowserSearchEngine.google.rawValue)
             XCTAssertEqual(
-                defaults.string(forKey: BrowserSearchSettings.customSearchEngineNameKey),
-                BrowserSearchSettings.defaultCustomSearchEngineName
+                defaults.string(forKey: BrowserSearchSettingsStore.customSearchEngineNameKey),
+                BrowserSearchSettingsStore.defaultCustomSearchEngineName
             )
             XCTAssertNotEqual(
-                defaults.string(forKey: BrowserSearchSettings.customSearchEngineURLTemplateKey),
+                defaults.string(forKey: BrowserSearchSettingsStore.customSearchEngineURLTemplateKey),
                 "ftp://search.example.test?q={query}"
             )
-            XCTAssertEqual(defaults.object(forKey: BrowserSearchSettings.searchSuggestionsEnabledKey) as? Bool, false)
+            XCTAssertEqual(defaults.object(forKey: BrowserSearchSettingsStore.searchSuggestionsEnabledKey) as? Bool, false)
             XCTAssertEqual(defaults.string(forKey: BrowserThemeSettings.modeKey), BrowserThemeMode.dark.rawValue)
         }
     }

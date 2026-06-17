@@ -119,8 +119,15 @@ enum FileExternalOpenAction {
     @discardableResult
     static func openDefault(fileURL: URL) -> Bool {
         let resolver = FileExternalOpenApplicationResolver.live
-        let primaryApplication = resolver.applications(for: fileURL).first
-        return open(fileURL: fileURL, applicationURL: primaryApplication?.url)
+        guard let defaultURL = resolver.defaultApplicationURL(fileURL) else {
+            return open(fileURL: fileURL, applicationURL: nil)
+        }
+        if resolver.shouldIncludeApplication(defaultURL) {
+            return open(fileURL: fileURL, applicationURL: defaultURL)
+        }
+        let fallbackURL = resolver.applicationURLs(fileURL).first(where: resolver.shouldIncludeApplication)
+        guard let fallbackURL else { return false }
+        return open(fileURL: fileURL, applicationURL: fallbackURL)
     }
 
     @discardableResult
@@ -1328,6 +1335,7 @@ struct FilePreviewPanelView: View {
 
     @State private var focusFlashOpacity = 0.0
     @State private var focusFlashAnimationGeneration = 0
+    @AppStorage(FilePreviewWordWrapSettings.key) private var fileEditorWordWrap = FilePreviewWordWrapSettings.defaultEnabled
 
     private var themeForegroundColor: NSColor {
         appearance.foregroundColor
@@ -1398,7 +1406,8 @@ struct FilePreviewPanelView: View {
                     isVisibleInUI: isVisibleInUI,
                     themeBackgroundColor: contentBackgroundColor,
                     themeForegroundColor: themeForegroundColor,
-                    drawsBackground: appearance.drawsContentBackground
+                    drawsBackground: appearance.drawsContentBackground,
+                    wordWrap: fileEditorWordWrap
                 )
             case .pdf:
                 FilePreviewPDFView(

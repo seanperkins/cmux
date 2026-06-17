@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -198,7 +199,9 @@ extension CMUXCLI {
     private struct DiffViewerDeferredSourceSet {
         var pages: [DiffViewerDeferredSourcePage]
         var layout: String
+        var layoutSource: String
         var appearance: DiffViewerAppearance
+        var runtime: URL?
     }
 
     private struct DiffViewerDeferredSourcePage {
@@ -244,6 +247,7 @@ extension CMUXCLI {
         var directory: URL
         var mapper: DiffViewerURLMapper
         var groupID: String
+        var runtime: URL?
     }
 
     private struct DiffViewerSourceOption {
@@ -377,9 +381,10 @@ extension CMUXCLI {
         var pid: Int32
         var rootPath: String
         var protocolVersion: String?
+        var executablePath: String?
     }
 
-    private static let diffViewerHTTPServerProtocolVersion = "wait-v2 remote-stream manifest-refresh react-app-v1"
+    private static let diffViewerHTTPServerProtocolVersion = "wait-v2 remote-stream manifest-refresh react-app-v2 executable-bound"
     private static let diffViewerHTTPServerHealthResponse = Data("ok \(diffViewerHTTPServerProtocolVersion)\n".utf8)
 
     private struct DiffViewerLabels {
@@ -396,12 +401,22 @@ extension CMUXCLI {
         static func localized() -> DiffViewerLabels {
             DiffViewerLabels(values: [
                 "additions": CMUXDiffViewerLocalization.string("diffViewer.additions", defaultValue: "Additions"),
+                "addComment": CMUXDiffViewerLocalization.string("diffViewer.addComment", defaultValue: "Add comment"),
                 "bars": CMUXDiffViewerLocalization.string("diffViewer.bars", defaultValue: "Bars"),
+                "cancelComment": CMUXDiffViewerLocalization.string("diffViewer.cancelComment", defaultValue: "Cancel"),
+                "comments": CMUXDiffViewerLocalization.string("diffViewer.comments", defaultValue: "Comments"),
+                "commentPlaceholder": CMUXDiffViewerLocalization.string("diffViewer.commentPlaceholder", defaultValue: "Leave a comment"),
+                "deleteComment": CMUXDiffViewerLocalization.string("diffViewer.deleteComment", defaultValue: "Delete"),
+                "editComment": CMUXDiffViewerLocalization.string("diffViewer.editComment", defaultValue: "Edit"),
+                "noComments": CMUXDiffViewerLocalization.string("diffViewer.noComments", defaultValue: "No comments yet"),
+                "outdatedComment": CMUXDiffViewerLocalization.string("diffViewer.outdatedComment", defaultValue: "Outdated"),
+                "saveComment": CMUXDiffViewerLocalization.string("diffViewer.saveComment", defaultValue: "Comment"),
                 "changedFiles": CMUXDiffViewerLocalization.string("diffViewer.changedFiles", defaultValue: "Changed files"),
                 "classic": CMUXDiffViewerLocalization.string("diffViewer.classic", defaultValue: "Classic"),
                 "commit": CMUXDiffViewerLocalization.string("about.commit", defaultValue: "Commit"),
                 "collapseAllDiffs": CMUXDiffViewerLocalization.string("diffViewer.collapseAllDiffs", defaultValue: "Collapse all diffs"),
                 "collapseUnchangedContext": CMUXDiffViewerLocalization.string("diffViewer.collapseUnchangedContext", defaultValue: "Collapse unchanged context"),
+                "copyFailedGitApplyCommand": CMUXDiffViewerLocalization.string("diffViewer.copyFailedGitApplyCommand", defaultValue: "Could not copy git apply command."),
                 "copiedGitApplyCommand": CMUXDiffViewerLocalization.string("diffViewer.copiedGitApplyCommand", defaultValue: "Copied git apply command"),
                 "copyGitApplyCommand": CMUXDiffViewerLocalization.string("diffViewer.copyGitApplyCommand", defaultValue: "Copy git apply command"),
                 "deletions": CMUXDiffViewerLocalization.string("diffViewer.deletions", defaultValue: "Deletions"),
@@ -778,10 +793,9 @@ extension CMUXCLI {
             focus = false
         }
 
-        let layout = parsedArgs.layout ?? "split"
-        guard layout == "split" || layout == "unified" else {
-            throw CLIError(message: "--layout must be split|unified")
-        }
+        let resolvedLayout = try resolveDiffViewerLayout(rawLayout: parsedArgs.layout)
+        let layout = resolvedLayout.layout
+        let layoutSource = resolvedLayout.source
 
         let fontSizeOverride: Double?
         if let rawFontSize = parsedArgs.fontSize {
@@ -829,6 +843,12 @@ extension CMUXCLI {
         )
         if let cwd = parsedArgs.cwd {
             diffSourceContext.repoRoot = try gitRepoRoot(startingAt: resolvePath(cwd))
+        } else if parsedArgs.source == nil {
+            // Piped patches get a best-effort repo root from the CLI's cwd so
+            // diff comments can persist per repository.
+            diffSourceContext.repoRoot = try? gitRepoRoot(
+                startingAt: FileManager.default.currentDirectoryPath
+            )
         }
         if parsedArgs.source != nil {
             try resolveTargetIfNeeded()
@@ -849,13 +869,16 @@ extension CMUXCLI {
             socketPath: socketPath,
             fontSizeOverride: fontSizeOverride
         )
+        let runtime = diffViewerRuntime(socketPath: socketPath)
         let viewer = try writeDiffViewer(
             rawInput: parsedArgs.inputs.first,
             source: parsedArgs.source,
             titleOverride: parsedArgs.title,
             layout: layout,
+            layoutSource: layoutSource,
             appearance: appearance,
-            context: diffSourceContext
+            context: diffSourceContext,
+            runtime: runtime
         )
 
         try resolveTargetIfNeeded()
@@ -889,10 +912,65 @@ extension CMUXCLI {
             return
         }
 
-        let completedViewer = try completeDeferredDiffViewer(viewer)
+        // Finalize the deferred viewer (writes the real diff HTML in place of the
+        // opening placeholder); its temp file path is an internal detail, so keep it
+        // out of the human output. Scripts that need it can use `--json`.
+        _ = try completeDeferredDiffViewer(viewer)
         let surfaceText = formatHandle(payload, kind: "surface", idFormat: idFormat) ?? "unknown"
         let paneText = formatHandle(payload, kind: "pane", idFormat: idFormat) ?? "unknown"
-        print("OK surface=\(surfaceText) pane=\(paneText) path=\(completedViewer.fileURL.path)")
+        print("OK surface=\(surfaceText) pane=\(paneText)")
+    }
+
+    private func diffViewerRuntime(socketPath: String) -> URL? {
+        if let taggedExecutableURL = taggedDiffViewerExecutableURL(socketPath: socketPath) {
+            return taggedExecutableURL
+        }
+        return nil
+    }
+
+    private func diffViewerExecutableURL(for runtime: URL?) -> URL? {
+        runtime ?? resolvedExecutableURL()
+    }
+
+    private func taggedDiffViewerExecutableURL(socketPath: String) -> URL? {
+        let socketName = URL(fileURLWithPath: socketPath).lastPathComponent
+        let prefix = "cmux-debug-"
+        let suffix = ".sock"
+        guard socketName.hasPrefix(prefix), socketName.hasSuffix(suffix) else {
+            return nil
+        }
+
+        let tagStart = socketName.index(socketName.startIndex, offsetBy: prefix.count)
+        let tagEnd = socketName.index(socketName.endIndex, offsetBy: -suffix.count)
+        let tag = String(socketName[tagStart..<tagEnd])
+        guard !tag.isEmpty,
+              tag.allSatisfy({ character in
+                  character.isLetter || character.isNumber || character == "-" || character == "_"
+              }) else {
+            return nil
+        }
+
+        let homePath = ProcessInfo.processInfo.environment["HOME"]
+            .flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+            ?? NSHomeDirectory()
+        let candidate = URL(fileURLWithPath: homePath, isDirectory: true)
+            .appendingPathComponent("Library/Developer/Xcode/DerivedData/cmux-\(tag)", isDirectory: true)
+            .appendingPathComponent("Build/Products/Debug/cmux DEV \(tag).app", isDirectory: true)
+            .appendingPathComponent("Contents/Resources/bin/cmux", isDirectory: false)
+            .standardizedFileURL
+
+        guard FileManager.default.isExecutableFile(atPath: candidate.path) else {
+            return nil
+        }
+        return canonicalFileURL(candidate)
+    }
+
+    private func canonicalFileURL(_ url: URL) -> URL {
+        if let resolvedPath = realpath(url.path, nil) {
+            defer { free(resolvedPath) }
+            return URL(fileURLWithPath: String(cString: resolvedPath)).standardizedFileURL
+        }
+        return url.standardizedFileURL
     }
 
     private func canonicalDiffSourceContext(
@@ -1185,6 +1263,57 @@ extension CMUXCLI {
         return roundedDiffViewerMetric(size)
     }
 
+    private func resolveDiffViewerLayout(rawLayout: String?) throws -> (layout: String, source: String) {
+        if let rawLayout {
+            return (try parseDiffViewerLayout(rawLayout, errorMessage: "--layout must be split|unified"), "explicit")
+        }
+        return (diffViewerDefaultLayoutSetting() ?? "unified", "default")
+    }
+
+    private func parseDiffViewerLayout(_ rawValue: String, errorMessage: String) throws -> String {
+        let normalized = rawValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard normalized == "split" || normalized == "unified" else {
+            throw CLIError(message: errorMessage)
+        }
+        return normalized
+    }
+
+    private func diffViewerDefaultLayoutSetting() -> String? {
+        for path in diffViewerDefaultSettingsPaths() {
+            guard let root = diffViewerSettingsRoot(at: path),
+                  let section = root["diffViewer"] as? [String: Any],
+                  let rawLayout = section["defaultLayout"] as? String,
+                  let layout = try? parseDiffViewerLayout(
+                      rawLayout,
+                      errorMessage: "diffViewer.defaultLayout must be split|unified"
+                  ) else {
+                continue
+            }
+            return layout
+        }
+        return nil
+    }
+
+    private func diffViewerDefaultSettingsPaths() -> [String] {
+        [
+            Self.primarySettingsDisplayPath,
+            Self.legacySettingsDisplayPath,
+            Self.fallbackSettingsDisplayPath,
+        ].map(Self.absoluteDiffViewerSettingsPath)
+    }
+
+    private func diffViewerSettingsRoot(at path: String) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              !data.isEmpty,
+              let sanitized = try? JSONCParser.preprocess(data: data),
+              let root = try? JSONSerialization.jsonObject(with: sanitized) as? [String: Any] else {
+            return nil
+        }
+        return root
+    }
+
     private func resolveOpenTarget(_ raw: String) throws -> OpenTarget {
         if let url = URL(string: raw),
            let scheme = url.scheme?.lowercased(),
@@ -1324,17 +1453,23 @@ extension CMUXCLI {
             }
             let env = ProcessInfo.processInfo.environment
             let baselineStorePath = CMUXAgentTurnDiffBaselineFile.path(env: env)
-            let record = try latestAgentTurnDiffBaseline(
+            if let record = try latestAgentTurnDiffBaseline(
                 repoRoot: repoRoot,
                 workspaceId: workspaceId,
                 surfaceId: surfaceId,
                 env: env
-            )
-            _ = try gitStdout(["cat-file", "-e", "\(record.baseCommit)^{tree}"], in: repoRoot)
-            patch = try joinedGitDiffPatches([
-                gitStdout(gitDiffPatchArguments([record.baseCommit, "--"]), in: repoRoot),
-                gitUntrackedPatchSinceBaseline(record: record, in: repoRoot, storePath: baselineStorePath)
-            ])
+            ) {
+                _ = try gitStdout(["cat-file", "-e", "\(record.baseCommit)^{tree}"], in: repoRoot)
+                patch = try joinedGitDiffPatches([
+                    gitStdout(gitDiffPatchArguments([record.baseCommit, "--"]), in: repoRoot),
+                    gitUntrackedPatchSinceBaseline(record: record, in: repoRoot, storePath: baselineStorePath)
+                ])
+            } else {
+                // No last-turn baseline recorded yet: emit an empty patch so the
+                // viewer renders the friendly empty diff state (with the source
+                // switcher) instead of throwing a developer-facing CLI error.
+                patch = ""
+            }
             sourceLabel = "git last-turn \(workspaceId) \(surfaceId)"
         }
         return DiffInput(
@@ -2301,12 +2436,18 @@ extension CMUXCLI {
         "refs/cmux/last-turn/untracked/\(blob)"
     }
 
+    /// Returns the most recent last-turn diff baseline recorded for the given
+    /// workspace/surface, or `nil` when no baseline has been recorded yet.
+    ///
+    /// A missing baseline is not an error: it means there is simply nothing to
+    /// diff for the last turn, so callers render the friendly empty diff state
+    /// (with the source switcher) rather than surfacing a raw CLI error.
     private func latestAgentTurnDiffBaseline(
         repoRoot: String,
         workspaceId: String,
         surfaceId: String,
         env: [String: String]
-    ) throws -> CMUXAgentTurnDiffBaselineRecord {
+    ) throws -> CMUXAgentTurnDiffBaselineRecord? {
         let store = try readAgentTurnDiffBaselineStore(path: CMUXAgentTurnDiffBaselineFile.path(env: env))
         let repoRoot = standardizedDiffSourcePath(repoRoot)
         let candidates = store.records.filter { record in
@@ -2314,10 +2455,7 @@ extension CMUXCLI {
                 && diffScopeIdentifierEquals(record.workspaceId, workspaceId)
                 && diffScopeIdentifierEquals(record.surfaceId, surfaceId)
         }
-        guard let record = candidates.max(by: { $0.capturedAt < $1.capturedAt }) else {
-            throw CLIError(message: "No last-turn diff baseline recorded for this workspace and surface yet. Run another agent turn with cmux hooks active, or use --unstaged, --staged, or --branch.")
-        }
-        return record
+        return candidates.max(by: { $0.capturedAt < $1.capturedAt })
     }
 
     private func readAgentTurnDiffBaselineStore(path: String) throws -> CMUXAgentTurnDiffBaselineStore {
@@ -2917,16 +3055,20 @@ extension CMUXCLI {
         source: DiffSource?,
         titleOverride: String?,
         layout: String,
+        layoutSource: String,
         appearance: DiffViewerAppearance,
-        context: DiffSourceContext
+        context: DiffSourceContext,
+        runtime: URL?
     ) throws -> DiffViewerWriteResult {
         if let source {
             return try writeGitDiffViewerHTMLSet(
                 selectedSource: source,
                 titleOverride: titleOverride,
                 layout: layout,
+                layoutSource: layoutSource,
                 appearance: appearance,
-                context: context
+                context: context,
+                runtime: runtime
             )
         }
 
@@ -2940,7 +3082,7 @@ extension CMUXCLI {
 
         let title = titleOverride ?? input.defaultTitle
         let directory = try diffViewerDirectory()
-        let origin = try diffViewerHTTPServerOrigin(rootDirectory: directory)
+        let origin = try diffViewerHTTPServerOrigin(rootDirectory: directory, runtime: runtime)
         let mapper = DiffViewerURLMapper(
             token: UUID().uuidString.lowercased(),
             rootDirectory: directory,
@@ -2957,10 +3099,13 @@ extension CMUXCLI {
             externalURL: input.externalURL,
             remotePatchURL: input.remotePatchURL,
             layout: layout,
+            layoutSource: layoutSource,
             appearance: appearance,
-            sourceOptions: []
+            sourceOptions: [],
+            repoRoot: context.repoRoot,
+            runtime: runtime
         )
-        let assets = try ensureDiffViewerAssets(nextTo: viewerFileURL)
+        let assets = try ensureDiffViewerAssets(nextTo: viewerFileURL, runtime: runtime)
         let allowedFiles = try diffViewerAllowedFiles(
             pageURLs: [viewerFileURL],
             assets: assets,
@@ -2985,15 +3130,18 @@ extension CMUXCLI {
         selectedSource: DiffSource,
         titleOverride: String?,
         layout: String,
+        layoutSource: String,
         appearance: DiffViewerAppearance,
-        context: DiffSourceContext
+        context: DiffSourceContext,
+        runtime: URL?
     ) throws -> DiffViewerWriteResult {
-        let target = try makeDiffViewerGitHTMLSetTarget()
+        let target = try makeDiffViewerGitHTMLSetTarget(runtime: runtime)
         if selectedSource != .lastTurn {
             return try writeOpeningGitDiffViewerHTMLSet(
                 selectedSource: selectedSource,
                 titleOverride: titleOverride,
                 layout: layout,
+                layoutSource: layoutSource,
                 appearance: appearance,
                 context: context,
                 target: target
@@ -3003,15 +3151,16 @@ extension CMUXCLI {
             selectedSource: selectedSource,
             titleOverride: titleOverride,
             layout: layout,
+            layoutSource: layoutSource,
             appearance: appearance,
             context: context,
             target: target
         )
     }
 
-    private func makeDiffViewerGitHTMLSetTarget() throws -> DiffViewerGitHTMLSetTarget {
+    private func makeDiffViewerGitHTMLSetTarget(runtime: URL?) throws -> DiffViewerGitHTMLSetTarget {
         let directory = try diffViewerDirectory()
-        let origin = try diffViewerHTTPServerOrigin(rootDirectory: directory)
+        let origin = try diffViewerHTTPServerOrigin(rootDirectory: directory, runtime: runtime)
         let mapper = DiffViewerURLMapper(
             token: UUID().uuidString.lowercased(),
             rootDirectory: directory,
@@ -3019,7 +3168,7 @@ extension CMUXCLI {
         )
         let timestamp = Int(Date().timeIntervalSince1970)
         let groupID = "\(timestamp)-\(UUID().uuidString.prefix(8))"
-        return DiffViewerGitHTMLSetTarget(directory: directory, mapper: mapper, groupID: groupID)
+        return DiffViewerGitHTMLSetTarget(directory: directory, mapper: mapper, groupID: groupID, runtime: runtime)
     }
 
     private func diffViewerLoadingDiffMessage(_ target: String) -> String {
@@ -3034,6 +3183,7 @@ extension CMUXCLI {
         selectedSource: DiffSource,
         titleOverride: String?,
         layout: String,
+        layoutSource: String,
         appearance: DiffViewerAppearance,
         context: DiffSourceContext,
         target: DiffViewerGitHTMLSetTarget
@@ -3058,14 +3208,16 @@ extension CMUXCLI {
             isError: false,
             pollForReplacement: true,
             layout: layout,
+            layoutSource: layoutSource,
             appearance: appearance,
             sourceOptions: [],
             repoOptions: [],
             baseOptions: [],
             repoRoot: repoRoot,
-            branchBaseRef: selectedSource == .branch ? context.branchBaseRef : nil
+            branchBaseRef: selectedSource == .branch ? context.branchBaseRef : nil,
+            runtime: target.runtime
         )
-        let assets = try ensureDiffViewerAssets(nextTo: openingFileURL)
+        let assets = try ensureDiffViewerAssets(nextTo: openingFileURL, runtime: target.runtime)
         let allowedFiles = try diffViewerAllowedFiles(
             pageURLs: [openingFileURL],
             assets: assets,
@@ -3096,6 +3248,7 @@ extension CMUXCLI {
                         selectedSource: selectedSource,
                         titleOverride: titleOverride,
                         layout: layout,
+                        layoutSource: layoutSource,
                         appearance: appearance,
                         context: context,
                         target: target,
@@ -3119,14 +3272,18 @@ extension CMUXCLI {
                         try? writeDiffViewerRedirectHTML(
                             to: openingFileURL,
                             title: title,
-                            targetURL: completed.url
+                            targetURL: completed.url,
+                            appearance: appearance,
+                            runtime: target.runtime
                         )
                         throw error
                     }
                     try writeDiffViewerRedirectHTML(
                         to: openingFileURL,
                         title: finalized.title,
-                        targetURL: finalized.url
+                        targetURL: finalized.url,
+                        appearance: appearance,
+                        runtime: target.runtime
                     )
                     _ = try completeDeferredDiffViewerSources(
                         completed.deferredSourceSet,
@@ -3144,12 +3301,14 @@ extension CMUXCLI {
                         isError: true,
                         pollForReplacement: false,
                         layout: layout,
+                        layoutSource: layoutSource,
                         appearance: appearance,
                         sourceOptions: [],
                         repoOptions: [],
                         baseOptions: [],
                         repoRoot: repoRoot,
-                        branchBaseRef: selectedSource == .branch ? context.branchBaseRef : nil
+                        branchBaseRef: selectedSource == .branch ? context.branchBaseRef : nil,
+                        runtime: target.runtime
                     )
                     throw error
                 }
@@ -3161,6 +3320,7 @@ extension CMUXCLI {
         selectedSource: DiffSource,
         titleOverride: String?,
         layout: String,
+        layoutSource: String,
         appearance: DiffViewerAppearance,
         context: DiffSourceContext,
         target: DiffViewerGitHTMLSetTarget,
@@ -3189,26 +3349,39 @@ extension CMUXCLI {
         }
         var selectedContext = try sourceContext(for: selectedSource, repoRoot: repoRoot)
         var selectedInput: DiffInput?
+        // When non-nil, the selected source has no changes: render the friendly,
+        // non-error empty diff state (with the source switcher) instead of failing.
+        var selectedEmptyMessage: String?
         if !shouldDeferSelectedSource {
             do {
                 selectedInput = try nonEmptyGitDiffInput(source: selectedSource, context: selectedContext)
             } catch let error as EmptyDiffSourceError {
-                guard selectedSource != .lastTurn else {
-                    throw CLIError(message: error.message)
-                }
-                var fallback: (source: DiffSource, context: DiffSourceContext, input: DiffInput)?
-                for candidate in DiffSource.allCases where candidate != selectedSource {
-                    guard let candidateContext = try? sourceContext(for: candidate, repoRoot: repoRoot),
-                          let candidateInput = try? nonEmptyGitDiffInput(source: candidate, context: candidateContext) else {
-                        continue
+                if selectedSource == .lastTurn {
+                    // Last turn is the user's explicit intent, so never silently
+                    // switch sources; show its empty state and keep the switcher.
+                    selectedEmptyMessage = error.message
+                    selectedInput = nil
+                } else {
+                    var fallback: (source: DiffSource, context: DiffSourceContext, input: DiffInput)?
+                    for candidate in DiffSource.allCases where candidate != selectedSource {
+                        guard let candidateContext = try? sourceContext(for: candidate, repoRoot: repoRoot),
+                              let candidateInput = try? nonEmptyGitDiffInput(source: candidate, context: candidateContext) else {
+                            continue
+                        }
+                        fallback = (candidate, candidateContext, candidateInput)
+                        break
                     }
-                    fallback = (candidate, candidateContext, candidateInput)
-                    break
+                    if let fallback {
+                        selectedSource = fallback.source
+                        selectedContext = fallback.context
+                        selectedInput = fallback.input
+                    } else {
+                        // Every source is empty: show the originally selected
+                        // source's empty state rather than a raw error.
+                        selectedEmptyMessage = error.message
+                        selectedInput = nil
+                    }
                 }
-                guard let fallback else { throw CLIError(message: error.message) }
-                selectedSource = fallback.source
-                selectedContext = fallback.context
-                selectedInput = fallback.input
             }
         }
         let fileURLs = Dictionary(uniqueKeysWithValues: DiffSource.allCases.map { source in
@@ -3311,12 +3484,14 @@ extension CMUXCLI {
                 isError: false,
                 pollForReplacement: true,
                 layout: layout,
+                layoutSource: layoutSource,
                 appearance: appearance,
                 sourceOptions: sourceOptions,
                 repoOptions: selectedRepoOptions,
                 baseOptions: selectedSource == .branch ? baseOptions : [],
                 repoRoot: repoRoot,
-                branchBaseRef: selectedSource == .branch ? selectedContext.branchBaseRef : nil
+                branchBaseRef: selectedSource == .branch ? selectedContext.branchBaseRef : nil,
+                runtime: target.runtime
             )
             let sourceFallbacks = Dictionary(uniqueKeysWithValues: DiffSource.allCases.compactMap { source -> (DiffSource, DiffViewerDeferredSourceFallback)? in
                 guard source != selectedSource,
@@ -3374,12 +3549,14 @@ extension CMUXCLI {
                     isError: false,
                     pollForReplacement: true,
                     layout: layout,
+                    layoutSource: layoutSource,
                     appearance: appearance,
                     sourceOptions: diffViewerSourceOptions(selected: source, urls: urls),
                     repoOptions: repoOptionsForSource(source, selectedRepoRoot: repoRoot),
                     baseOptions: source == .branch ? baseOptions : [],
                     repoRoot: repoRoot,
-                    branchBaseRef: source == .branch ? pageContext.branchBaseRef : nil
+                    branchBaseRef: source == .branch ? pageContext.branchBaseRef : nil,
+                    runtime: target.runtime
                 )
                 deferredPages.append(
                     DiffViewerDeferredSourcePage(
@@ -3419,12 +3596,14 @@ extension CMUXCLI {
                     isError: false,
                     pollForReplacement: true,
                     layout: layout,
+                    layoutSource: layoutSource,
                     appearance: appearance,
                     sourceOptions: sourceOptionsForRepo(selected: source, selectedRepoRoot: option.repoRoot),
                     repoOptions: repoOptionsForSource(source, selectedRepoRoot: option.repoRoot),
                     baseOptions: [],
                     repoRoot: option.repoRoot,
-                    branchBaseRef: source == .branch ? explicitBranchBaseRef : nil
+                    branchBaseRef: source == .branch ? explicitBranchBaseRef : nil,
+                    runtime: target.runtime
                 )
                 deferredPages.append(
                     DiffViewerDeferredSourcePage(
@@ -3459,6 +3638,7 @@ extension CMUXCLI {
                 isError: false,
                 pollForReplacement: true,
                 layout: layout,
+                layoutSource: layoutSource,
                 appearance: appearance,
                 sourceOptions: diffViewerSourceOptions(selected: .branch, urls: urls),
                 repoOptions: repoOptionsForSource(.branch, selectedRepoRoot: repoRoot),
@@ -3468,7 +3648,8 @@ extension CMUXCLI {
                     urls: baseURLs
                 ),
                 repoRoot: repoRoot,
-                branchBaseRef: option.ref
+                branchBaseRef: option.ref,
+                runtime: target.runtime
             )
             deferredPages.append(
                 DiffViewerDeferredSourcePage(
@@ -3497,15 +3678,37 @@ extension CMUXCLI {
                 externalURL: selectedInput.externalURL,
                 remotePatchURL: selectedInput.remotePatchURL,
                 layout: layout,
+                layoutSource: layoutSource,
                 appearance: appearance,
                 sourceOptions: sourceOptions,
                 repoOptions: selectedRepoOptions,
                 baseOptions: selectedSource == .branch ? baseOptions : [],
                 repoRoot: repoRoot,
-                branchBaseRef: selectedSource == .branch ? selectedContext.branchBaseRef : nil
+                branchBaseRef: selectedSource == .branch ? selectedContext.branchBaseRef : nil,
+                runtime: target.runtime
+            )
+        } else if let selectedEmptyMessage {
+            // Friendly, non-error empty diff state: the panel shows plain-language
+            // text plus the source switcher so the user can pick another diff.
+            try writeDiffViewerStatusHTML(
+                to: selectedFileURL,
+                title: titleOverride ?? selectedSource.title,
+                sourceLabel: "git \(selectedSource.slug)",
+                message: selectedEmptyMessage,
+                isError: false,
+                pollForReplacement: false,
+                layout: layout,
+                layoutSource: layoutSource,
+                appearance: appearance,
+                sourceOptions: sourceOptions,
+                repoOptions: selectedRepoOptions,
+                baseOptions: selectedSource == .branch ? baseOptions : [],
+                repoRoot: repoRoot,
+                branchBaseRef: selectedSource == .branch ? selectedContext.branchBaseRef : nil,
+                runtime: target.runtime
             )
         }
-        let assets = try ensureDiffViewerAssets(nextTo: selectedFileURL)
+        let assets = try ensureDiffViewerAssets(nextTo: selectedFileURL, runtime: target.runtime)
         let pageURLs = [selectedFileURL] + deferredPages.map(\.url)
         var allowedFiles = try diffViewerAllowedFiles(
             pageURLs: pageURLs,
@@ -3542,7 +3745,9 @@ extension CMUXCLI {
             deferredSourceSet: DiffViewerDeferredSourceSet(
                 pages: deferredPages,
                 layout: layout,
-                appearance: appearance
+                layoutSource: layoutSource,
+                appearance: appearance,
+                runtime: target.runtime
             )
         )
     }
@@ -3628,12 +3833,14 @@ extension CMUXCLI {
             isError: true,
             pollForReplacement: false,
             layout: sourceSet.layout,
+            layoutSource: sourceSet.layoutSource,
             appearance: sourceSet.appearance,
             sourceOptions: page.sourceOptions,
             repoOptions: page.repoOptions,
             baseOptions: page.baseOptions,
             repoRoot: page.context.repoRoot,
-            branchBaseRef: page.source == .branch ? page.context.branchBaseRef : nil
+            branchBaseRef: page.source == .branch ? page.context.branchBaseRef : nil,
+            runtime: sourceSet.runtime
         )
     }
 
@@ -3674,21 +3881,11 @@ extension CMUXCLI {
                         baseOptions: fallback.baseOptions,
                         sourceSet: sourceSet
                     )
-                    try? writeDiffViewerStatusHTML(
-                        to: page.url,
-                        title: page.titleOverride ?? page.source.title,
-                        sourceLabel: "git \(page.source.slug)",
-                        message: error.message,
-                        isError: true,
-                        pollForReplacement: false,
-                        layout: sourceSet.layout,
-                        appearance: sourceSet.appearance,
-                        sourceOptions: page.sourceOptions,
-                        repoOptions: page.repoOptions,
-                        baseOptions: page.baseOptions,
-                        repoRoot: page.context.repoRoot,
-                        branchBaseRef: page.source == .branch ? page.context.branchBaseRef : nil
-                    )
+                    // The originally selected source is empty; leave its own page as
+                    // a friendly empty state so switching back to it never shows a
+                    // raw error. This is a secondary page (the fallback page is the
+                    // returned result), so a write failure here is best-effort.
+                    try? writeDiffViewerEmptyStatePage(message: error.message, page: page, sourceSet: sourceSet)
                     completion.completedPageURLs.insert(page.url)
                     return completion
                 } catch is EmptyDiffSourceError {
@@ -3697,8 +3894,69 @@ extension CMUXCLI {
                     throw fallbackError
                 }
             }
-            throw error
+            // No source has changes: render the selected source's friendly empty
+            // state. A write failure must propagate so the deferred pipeline does
+            // not report success while a stale loading page remains.
+            try writeDiffViewerEmptyStatePage(message: error.message, page: page, sourceSet: sourceSet)
+            return deferredDiffViewerEmptyStateCompletion(message: error.message, page: page)
+        } catch let error as EmptyDiffSourceError {
+            // Sources that never fall back (last turn) still render their own
+            // friendly empty state rather than surfacing a developer-facing error.
+            try writeDiffViewerEmptyStatePage(message: error.message, page: page, sourceSet: sourceSet)
+            return deferredDiffViewerEmptyStateCompletion(message: error.message, page: page)
         }
+    }
+
+    /// Writes the friendly, non-error empty diff state for a deferred source page.
+    ///
+    /// Used when a source has no changes to show: the panel renders plain-language
+    /// text plus the source switcher instead of a raw error, and the CLI exits
+    /// successfully so the launcher never emits an error beep. Throws if the
+    /// replacement page cannot be written, so callers never report success while a
+    /// stale loading page remains.
+    private func writeDiffViewerEmptyStatePage(
+        message: String,
+        page: DiffViewerDeferredSourcePage,
+        sourceSet: DiffViewerDeferredSourceSet
+    ) throws {
+        try writeDiffViewerStatusHTML(
+            to: page.url,
+            title: page.titleOverride ?? page.source.title,
+            sourceLabel: "git \(page.source.slug)",
+            message: message,
+            isError: false,
+            pollForReplacement: false,
+            layout: sourceSet.layout,
+            layoutSource: sourceSet.layoutSource,
+            appearance: sourceSet.appearance,
+            sourceOptions: page.sourceOptions,
+            repoOptions: page.repoOptions,
+            baseOptions: page.source == .branch ? page.baseOptions : [],
+            repoRoot: page.context.repoRoot,
+            branchBaseRef: page.source == .branch ? page.context.branchBaseRef : nil,
+            runtime: sourceSet.runtime
+        )
+    }
+
+    /// Builds the completion describing a rendered empty diff state for a deferred
+    /// source page. Pure value construction; the page must already be written via
+    /// ``writeDiffViewerEmptyStatePage(message:page:sourceSet:)``.
+    private func deferredDiffViewerEmptyStateCompletion(
+        message: String,
+        page: DiffViewerDeferredSourcePage
+    ) -> DiffViewerDeferredCompletion {
+        DiffViewerDeferredCompletion(
+            input: DiffInput(
+                patch: "",
+                sourceLabel: "git \(page.source.slug)",
+                defaultTitle: page.titleOverride ?? page.source.title,
+                emptyMessage: message,
+                externalURL: nil
+            ),
+            fileURL: page.url,
+            viewerURL: page.viewerURL,
+            completedPageURLs: [page.url]
+        )
     }
 
     private func writeDeferredDiffViewerSource(
@@ -3725,12 +3983,14 @@ extension CMUXCLI {
             externalURL: input.externalURL,
             remotePatchURL: input.remotePatchURL,
             layout: sourceSet.layout,
+            layoutSource: sourceSet.layoutSource,
             appearance: sourceSet.appearance,
             sourceOptions: sourceOptions,
             repoOptions: repoOptions,
             baseOptions: baseOptions,
             repoRoot: pageContext.repoRoot,
-            branchBaseRef: source == .branch ? pageContext.branchBaseRef : nil
+            branchBaseRef: source == .branch ? pageContext.branchBaseRef : nil,
+            runtime: sourceSet.runtime
         )
         return DiffViewerDeferredCompletion(
             input: input,
@@ -4008,7 +4268,7 @@ extension CMUXCLI {
         try runDiffViewerHTTPServer(rootDirectory: rootDirectory)
     }
 
-    private func diffViewerHTTPServerOrigin(rootDirectory: URL) throws -> URL {
+    private func diffViewerHTTPServerOrigin(rootDirectory: URL, runtime: URL? = nil) throws -> URL {
         let rootDirectory = rootDirectory.standardizedFileURL.resolvingSymlinksInPath()
         try validateSecureDiffViewerDirectory(rootDirectory, repairPermissions: false)
 
@@ -4016,6 +4276,7 @@ extension CMUXCLI {
            state.rootPath == rootDirectory.path,
            state.protocolVersion == Self.diffViewerHTTPServerProtocolVersion,
            (1...65535).contains(state.port),
+           diffViewerHTTPServerStateMatchesRuntimeExecutable(state, runtime: runtime),
            diffViewerHTTPServerIsReachable(port: state.port) {
             guard let url = URL(string: "http://127.0.0.1:\(state.port)") else {
                 throw CLIError(message: "Failed to build diff viewer server URL")
@@ -4023,7 +4284,7 @@ extension CMUXCLI {
             return url
         }
 
-        return try startDiffViewerHTTPServer(rootDirectory: rootDirectory)
+        return try startDiffViewerHTTPServer(rootDirectory: rootDirectory, runtime: runtime)
     }
 
     private func readDiffViewerHTTPServerState(rootDirectory: URL) throws -> DiffViewerHTTPServerState {
@@ -4039,8 +4300,40 @@ extension CMUXCLI {
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
-    private func startDiffViewerHTTPServer(rootDirectory: URL) throws -> URL {
-        guard let executableURL = resolvedExecutableURL() else {
+    private func diffViewerHTTPServerStateMatchesRuntimeExecutable(_ state: DiffViewerHTTPServerState, runtime: URL?) -> Bool {
+        guard state.pid > 0,
+              let currentExecutablePath = diffViewerExecutableURL(for: runtime)?.path,
+              let serverExecutablePath = diffViewerHTTPServerExecutablePath(pid: state.pid),
+              serverExecutablePath == currentExecutablePath else {
+            return false
+        }
+
+        guard let recordedExecutablePath = state.executablePath else {
+            return true
+        }
+        return recordedExecutablePath == currentExecutablePath
+    }
+
+    private func diffViewerHTTPServerExecutablePath(pid: Int32) -> String? {
+        var buffer = [CChar](repeating: 0, count: 4096)
+        let count = buffer.withUnsafeMutableBufferPointer { pointer -> Int32 in
+            guard let baseAddress = pointer.baseAddress else { return 0 }
+            return proc_pidpath(pid, baseAddress, UInt32(pointer.count))
+        }
+        guard count > 0 else {
+            return nil
+        }
+
+        let rawPath = String(cString: buffer)
+        if let resolvedPath = realpath(rawPath, nil) {
+            defer { free(resolvedPath) }
+            return URL(fileURLWithPath: String(cString: resolvedPath)).standardizedFileURL.path
+        }
+        return URL(fileURLWithPath: rawPath).standardizedFileURL.path
+    }
+
+    private func startDiffViewerHTTPServer(rootDirectory: URL, runtime: URL? = nil) throws -> URL {
+        guard let executableURL = diffViewerExecutableURL(for: runtime) else {
             throw CLIError(message: "Failed to resolve cmux executable for diff viewer server")
         }
 
@@ -4176,7 +4469,8 @@ extension CMUXCLI {
                 port: port,
                 pid: getpid(),
                 rootPath: rootDirectory.path,
-                protocolVersion: Self.diffViewerHTTPServerProtocolVersion
+                protocolVersion: Self.diffViewerHTTPServerProtocolVersion,
+                executablePath: resolvedExecutableURL()?.path
             ),
             rootDirectory: rootDirectory
         )
@@ -4948,7 +5242,7 @@ extension CMUXCLI {
             return path.hasSuffix(".html")
         }
         if mimeType == "text/javascript" {
-            return path.hasSuffix(".mjs")
+            return path.hasSuffix(".mjs") || path.hasSuffix(".js")
         }
         if mimeType == "text/x-diff" {
             return path.hasSuffix(".patch")
@@ -5197,6 +5491,7 @@ extension CMUXCLI {
         externalURL: String?,
         remotePatchURL: URL? = nil,
         layout: String,
+        layoutSource: String,
         appearance: DiffViewerAppearance,
         sourceOptions: [DiffViewerSourceOption],
         repoOptions: [DiffViewerSourceOption] = [],
@@ -5217,6 +5512,7 @@ extension CMUXCLI {
             externalURL: externalURL,
             remotePatchURL: remotePatchURL,
             layout: layout,
+            layoutSource: layoutSource,
             appearance: appearance,
             sourceOptions: sourceOptions,
             repoOptions: repoOptions,
@@ -5235,12 +5531,14 @@ extension CMUXCLI {
         isError: Bool,
         pollForReplacement: Bool,
         layout: String,
+        layoutSource: String,
         appearance: DiffViewerAppearance,
         sourceOptions: [DiffViewerSourceOption],
         repoOptions: [DiffViewerSourceOption] = [],
         baseOptions: [DiffViewerSourceOption] = [],
         repoRoot: String? = nil,
-        branchBaseRef: String? = nil
+        branchBaseRef: String? = nil,
+        runtime: URL? = nil
     ) throws {
         try writeDiffViewerHTML(
             to: viewerURL,
@@ -5249,6 +5547,7 @@ extension CMUXCLI {
             sourceLabel: sourceLabel,
             externalURL: nil,
             layout: layout,
+            layoutSource: layoutSource,
             appearance: appearance,
             sourceOptions: sourceOptions,
             repoOptions: repoOptions,
@@ -5257,16 +5556,25 @@ extension CMUXCLI {
             branchBaseRef: branchBaseRef,
             statusMessage: message,
             statusIsError: isError,
-            pollForReplacement: pollForReplacement
+            pollForReplacement: pollForReplacement,
+            runtime: runtime
         )
     }
 
-    private func writeDiffViewerRedirectHTML(to viewerURL: URL, title: String, targetURL: URL) throws {
+    private func writeDiffViewerRedirectHTML(
+        to viewerURL: URL,
+        title: String,
+        targetURL: URL,
+        appearance: DiffViewerAppearance,
+        runtime: URL? = nil
+    ) throws {
         try writeDiffViewerPatchSidecar("", for: viewerURL)
+        _ = try ensureDiffViewerAssets(nextTo: viewerURL, runtime: runtime)
         let target = targetURL.absoluteString
         let targetLiteral = try jsonStringLiteral(target)
         let escapedTitle = htmlEscaped(title)
         let escapedTarget = htmlEscaped(target)
+        let prepaintStyle = diffViewerPrepaintStyle(appearance: appearance)
         let html = """
         <!doctype html>
         <html>
@@ -5275,6 +5583,7 @@ extension CMUXCLI {
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <meta http-equiv="refresh" content="0;url=\(escapedTarget)">
           <title>\(escapedTitle)</title>
+          \(prepaintStyle)
         </head>
         <body data-cmux-diff-redirect="\(escapedTarget)">
           <script>
@@ -5294,6 +5603,7 @@ extension CMUXCLI {
         externalURL: String?,
         remotePatchURL: URL? = nil,
         layout: String,
+        layoutSource: String,
         appearance: DiffViewerAppearance,
         sourceOptions: [DiffViewerSourceOption],
         repoOptions: [DiffViewerSourceOption] = [],
@@ -5302,7 +5612,8 @@ extension CMUXCLI {
         branchBaseRef: String? = nil,
         statusMessage: String? = nil,
         statusIsError: Bool = false,
-        pollForReplacement: Bool = false
+        pollForReplacement: Bool = false,
+        runtime: URL? = nil
     ) throws {
         if remotePatchURL == nil {
             try writeDiffViewerPatchSidecar(patch, for: viewerURL)
@@ -5313,6 +5624,7 @@ extension CMUXCLI {
             "title": title,
             "sourceLabel": sourceLabel,
             "layout": layout,
+            "layoutSource": layoutSource,
             "appearance": appearance.jsonObject,
             "labels": labels.jsonObject,
             "shortcuts": diffViewerShortcutPayload(),
@@ -5337,7 +5649,7 @@ extension CMUXCLI {
         if let branchBaseRef {
             payload["branchBaseRef"] = branchBaseRef
         }
-        let assets = try ensureDiffViewerAssets(nextTo: viewerURL)
+        let assets = try ensureDiffViewerAssets(nextTo: viewerURL, runtime: runtime)
         let config: [String: Any] = [
             "payload": payload,
             "assets": [
@@ -5352,6 +5664,7 @@ extension CMUXCLI {
         let escapedTitle = htmlEscaped(title)
         let htmlLanguage = Locale.current.language.languageCode?.identifier ?? "en"
         let pendingAttribute = pollForReplacement ? " data-cmux-diff-pending=\"true\"" : ""
+        let prepaintStyle = diffViewerPrepaintStyle(appearance: appearance)
         let html = """
         <!doctype html>
         <html lang="\(htmlEscaped(htmlLanguage))"\(pendingAttribute)>
@@ -5359,6 +5672,7 @@ extension CMUXCLI {
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <title>\(escapedTitle)</title>
+          \(prepaintStyle)
         </head>
         <body>
           <script id="cmux-diff-viewer-config" type="application/json">\(configLiteral)</script>
@@ -5370,16 +5684,88 @@ extension CMUXCLI {
         try html.write(to: viewerURL, atomically: true, encoding: .utf8)
     }
 
-    private func ensureDiffViewerAssets(nextTo viewerURL: URL) throws -> DiffViewerAssets {
-        let sourceDirectory = try diffViewerBundledAssetDirectory()
-        let assetDirectoryName = "pierre-diffs-1.2.1-trees-1.0.0-beta.4"
+    private func diffViewerPrepaintStyle(appearance: DiffViewerAppearance) -> String {
+        let lightBackground = diffViewerCSSColor(
+            appearance.lightTheme.background,
+            opacity: appearance.backgroundOpacity
+        )
+        let darkBackground = diffViewerCSSColor(
+            appearance.darkTheme.background,
+            opacity: appearance.backgroundOpacity
+        )
+        let lightForeground = diffViewerCSSColor(appearance.lightTheme.foreground)
+        let darkForeground = diffViewerCSSColor(appearance.darkTheme.foreground)
+        return """
+        <style id="cmux-diff-viewer-prepaint">
+          :root {
+            color-scheme: light dark;
+            background: \(lightBackground);
+          }
+          html,
+          body,
+          #root {
+            min-height: 100%;
+          }
+          html,
+          body {
+            margin: 0;
+            background: \(lightBackground);
+            color: \(lightForeground);
+          }
+          @media (prefers-color-scheme: dark) {
+            :root {
+              background: \(darkBackground);
+            }
+            html,
+            body {
+              background: \(darkBackground);
+              color: \(darkForeground);
+            }
+          }
+        </style>
+        """
+    }
+
+    private func diffViewerCSSColor(_ rawValue: String, opacity: Double = 1) -> String {
+        guard let color = normalizedDiffViewerHexColor(rawValue) else {
+            return rawValue
+        }
+        let clampedOpacity = min(1, max(0, opacity))
+        guard clampedOpacity < 1,
+              let rgb = diffViewerRGBColor(color) else {
+            return color
+        }
+        let red = Int((rgb.red * 255).rounded())
+        let green = Int((rgb.green * 255).rounded())
+        let blue = Int((rgb.blue * 255).rounded())
+        return "rgba(\(red), \(green), \(blue), \(diffViewerCSSNumber(clampedOpacity)))"
+    }
+
+    private func diffViewerCSSNumber(_ value: Double) -> String {
+        let rounded = roundedDiffViewerMetric(value)
+        if rounded.rounded(.towardZero) == rounded {
+            return String(Int(rounded))
+        }
+        var text = String(rounded)
+        while text.hasSuffix("0") {
+            text.removeLast()
+        }
+        if text.hasSuffix(".") {
+            text.removeLast()
+        }
+        return text
+    }
+
+    private func ensureDiffViewerAssets(nextTo viewerURL: URL, runtime: URL? = nil) throws -> DiffViewerAssets {
+        let sourceDirectory = try diffViewerBundledAssetDirectory(runtime: runtime)
+        let assetDirectoryName = "pierre-diffs-1.2.7-trees-1.0.0-beta.4"
         let targetDirectory = viewerURL.deletingLastPathComponent()
             .appendingPathComponent("assets", isDirectory: true)
             .appendingPathComponent(assetDirectoryName, isDirectory: true)
         try FileManager.default.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
 
-        let appSourceDirectory = try diffViewerBundledAppAssetDirectory(nextTo: sourceDirectory)
-        let appAssetDirectoryName = "cmux-diff-viewer-app"
+        let appAssets = try diffViewerBundledAppAssetDirectory(nextTo: sourceDirectory)
+        let appAssetDirectoryName = appAssets.targetDirectoryName
         let targetAppDirectory = viewerURL.deletingLastPathComponent()
             .appendingPathComponent("assets", isDirectory: true)
             .appendingPathComponent(appAssetDirectoryName, isDirectory: true)
@@ -5389,19 +5775,19 @@ extension CMUXCLI {
         guard assetPaths.contains("diffs.mjs"),
               assetPaths.contains("trees.mjs"),
               assetPaths.contains("worker-pool/worker-pool.mjs"),
-              assetPaths.contains("worker-pool/worker-portable.mjs") else {
+              assetPaths.contains("worker-pool/worker-portable.js") else {
             throw CLIError(message: "Bundled diff viewer entry assets not found")
         }
         for assetPath in assetPaths {
             try copyDiffViewerAsset(relativePath: assetPath, from: sourceDirectory, to: targetDirectory)
         }
 
-        let appAssetPaths = try diffViewerBundledAssetRelativePaths(in: appSourceDirectory)
+        let appAssetPaths = try diffViewerBundledAssetRelativePaths(in: appAssets.sourceDirectory)
         guard appAssetPaths.contains("main.mjs") else {
             throw CLIError(message: "Bundled cmux diff viewer app entry asset not found")
         }
         for assetPath in appAssetPaths {
-            try copyDiffViewerAsset(relativePath: assetPath, from: appSourceDirectory, to: targetAppDirectory)
+            try copyDiffViewerAsset(relativePath: assetPath, from: appAssets.sourceDirectory, to: targetAppDirectory)
         }
 
         return DiffViewerAssets(
@@ -5409,25 +5795,50 @@ extension CMUXCLI {
             diffsModuleURL: "./assets/\(assetDirectoryName)/diffs.mjs",
             treesModuleURL: "./assets/\(assetDirectoryName)/trees.mjs",
             workerPoolModuleURL: "./assets/\(assetDirectoryName)/worker-pool/worker-pool.mjs",
-            workerModuleURL: "./assets/\(assetDirectoryName)/worker-pool/worker-portable.mjs",
+            workerModuleURL: "./assets/\(assetDirectoryName)/worker-pool/worker-portable.js",
             files: assetPaths.map { targetDirectory.appendingPathComponent($0, isDirectory: false) }
                 + appAssetPaths.map { targetAppDirectory.appendingPathComponent($0, isDirectory: false) }
         )
     }
 
-    private func diffViewerBundledAppAssetDirectory(nextTo sourceDirectory: URL) throws -> URL {
-        let appDirectory = sourceDirectory
-            .deletingLastPathComponent()
-            .appendingPathComponent("diff-viewer-app", isDirectory: true)
-            .standardizedFileURL
-        let entry = appDirectory.appendingPathComponent("main.mjs", isDirectory: false)
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: appDirectory.path, isDirectory: &isDirectory),
-              isDirectory.boolValue,
-              FileManager.default.fileExists(atPath: entry.path) else {
-            throw CLIError(message: "Bundled cmux diff viewer app assets not found")
+    private func diffViewerBundledAppAssetDirectory(
+        nextTo sourceDirectory: URL
+    ) throws -> (sourceDirectory: URL, targetDirectoryName: String) {
+        let sourceRoot = sourceDirectory.deletingLastPathComponent()
+        let candidates: [(sourceName: String, targetName: String)] = [
+            ("webviews-app", "cmux-webviews-app"),
+            ("diff-viewer-app", "cmux-diff-viewer-app")
+        ]
+        for candidate in candidates {
+            let appDirectory = sourceRoot
+                .appendingPathComponent(candidate.sourceName, isDirectory: true)
+                .standardizedFileURL
+            let entry = appDirectory.appendingPathComponent("main.mjs", isDirectory: false)
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: appDirectory.path, isDirectory: &isDirectory),
+               isDirectory.boolValue,
+               FileManager.default.fileExists(atPath: entry.path) {
+                // The shared /tmp asset cache is written by every running cmux
+                // build (stable, nightly, each tagged dev app). Content-key the
+                // directory so builds with different webview bundles coexist
+                // instead of clobbering each other's chunks, which broke pages
+                // whose per-token allowlist no longer matched the files on disk.
+                let targetName = "\(candidate.targetName)-\(try diffViewerAppAssetContentKey(directory: appDirectory))"
+                return (sourceDirectory: appDirectory, targetDirectoryName: targetName)
+            }
         }
-        return appDirectory
+        throw CLIError(message: "Bundled cmux diff viewer app assets not found")
+    }
+
+    private func diffViewerAppAssetContentKey(directory: URL) throws -> String {
+        var hasher = SHA256()
+        for relativePath in try diffViewerBundledAssetRelativePaths(in: directory).sorted() {
+            hasher.update(data: Data(relativePath.utf8))
+            let fileURL = directory.appendingPathComponent(relativePath, isDirectory: false)
+            hasher.update(data: try Data(contentsOf: fileURL, options: .mappedIfSafe))
+        }
+        let digest = hasher.finalize()
+        return digest.map { String(format: "%02x", $0) }.joined().prefix(12).lowercased()
     }
 
     private func copyDiffViewerAsset(relativePath: String, from sourceDirectory: URL, to targetDirectory: URL) throws {
@@ -5478,7 +5889,7 @@ extension CMUXCLI {
 
         var relativePaths: [String] = []
         for case let fileURL as URL in enumerator {
-            guard fileURL.pathExtension == "mjs",
+            guard ["js", "mjs"].contains(fileURL.pathExtension),
                   let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]),
                   values.isRegularFile == true else {
                 continue
@@ -5503,15 +5914,15 @@ extension CMUXCLI {
         return targetDate >= sourceDate
     }
 
-    private func diffViewerBundledAssetDirectory() throws -> URL {
-        let candidates = diffViewerBundledAssetDirectoryCandidates()
+    private func diffViewerBundledAssetDirectory(runtime: URL? = nil) throws -> URL {
+        let candidates = diffViewerBundledAssetDirectoryCandidates(runtime: runtime)
         if let directory = candidates.first {
             return directory
         }
         throw CLIError(message: "Bundled diff viewer assets not found")
     }
 
-    private func diffViewerBundledAssetDirectoryCandidates() -> [URL] {
+    private func diffViewerBundledAssetDirectoryCandidates(runtime: URL? = nil) -> [URL] {
         let fileManager = FileManager.default
         var candidates: [URL] = []
         var seen: Set<String> = []
@@ -5534,13 +5945,7 @@ extension CMUXCLI {
             candidates.append(standardized)
         }
 
-        appendIfExisting(
-            Bundle.main.resourceURL?
-                .appendingPathComponent("markdown-viewer", isDirectory: true)
-                .appendingPathComponent("diff-viewer", isDirectory: true)
-        )
-
-        if let executableURL = resolvedExecutableURL() {
+        if let executableURL = diffViewerExecutableURL(for: runtime) {
             let execDir = executableURL.deletingLastPathComponent().standardizedFileURL
             for relativePath in [
                 "markdown-viewer/diff-viewer",
@@ -5575,6 +5980,12 @@ extension CMUXCLI {
                 current = current.deletingLastPathComponent().standardizedFileURL
             }
         }
+
+        appendIfExisting(
+            Bundle.main.resourceURL?
+                .appendingPathComponent("markdown-viewer", isDirectory: true)
+                .appendingPathComponent("diff-viewer", isDirectory: true)
+        )
 
         let devRelative = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -5700,7 +6111,7 @@ extension CMUXCLI {
           --focus <true|false>         Focus the diff browser split (default: false)
           --no-focus                   Do not focus the opened diff browser split
           --title <text>               Set the diff viewer title to the provided text
-          --layout <split|unified>     Diff layout (default: split)
+          --layout <split|unified>     Diff layout (default: unified; configurable via diffViewer.defaultLayout in cmux.json)
           --font-size <points>         Set diff font size (default: 10)
 
         Examples:
