@@ -1,6 +1,7 @@
 import Sparkle
 import Cocoa
 import Combine
+import CmuxSocketControl
 import SwiftUI
 
 enum UpdateSettings {
@@ -62,6 +63,12 @@ class UpdateController {
     private let readyRetryDelay: TimeInterval = 0.25
     private let readyRetryCount: Int = 20
     private let backgroundProbeInterval: TimeInterval = UpdateSettings.scheduledCheckInterval
+    /// True for staging builds. Sparkle's `SUFeedURL` is the production appcast, so
+    /// a staging build (whose version trails the latest release) would otherwise
+    /// surface a spurious "update available" indicator — and installing it would
+    /// clobber the isolated staging build with the production app. Disabling all
+    /// update checks keeps staging self-contained.
+    private let updatesDisabled: Bool
 
     var viewModel: UpdateViewModel {
         userDriver.viewModel
@@ -73,6 +80,7 @@ class UpdateController {
     }
 
     init() {
+        self.updatesDisabled = SocketControlSettings.isStagingBundleIdentifier(Bundle.main.bundleIdentifier)
         let defaults = UserDefaults.standard
         UpdateSettings.apply(to: defaults)
 
@@ -98,6 +106,10 @@ class UpdateController {
 
     /// Start the updater. If startup fails, the error is shown via the custom UI.
     func startUpdaterIfNeeded() {
+        guard !updatesDisabled else {
+            UpdateLogStore.shared.append("updates disabled (staging build); updater not started")
+            return
+        }
         guard !didStartUpdater else { return }
         ensureSparkleInstallationCache()
 #if DEBUG
@@ -234,6 +246,11 @@ class UpdateController {
 
     /// Check for updates once the updater is ready (used by UI tests).
     func checkForUpdatesWhenReady(retries: Int = 10) {
+        guard !updatesDisabled else {
+            UpdateLogStore.shared.append("check for updates ignored (staging build)")
+            viewModel.state = .idle
+            return
+        }
         readyCheckWorkItem?.cancel()
         readyCheckWorkItem = nil
         startUpdaterIfNeeded()
