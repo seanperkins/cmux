@@ -1,6 +1,7 @@
 import AppKit
 import Bonsplit
 import Carbon.HIToolbox
+import CodeEditLanguages
 import Quartz
 import XCTest
 
@@ -199,6 +200,33 @@ final class FilePreviewReviewFeedbackTests: XCTestCase {
         XCTAssertTrue(window.firstResponder === focusTarget)
     }
 
+    // Regression for the highlighted file-preview crash on macOS 26: CodeEditSourceEditor
+    // reads `theme.background.brightnessComponent` without a colorspace conversion, and
+    // that selector traps (SIGILL) for catalog/dynamic/`.clear` colors — which crashed the
+    // editor the moment a preview opened. The resolved theme background must always be a
+    // concrete color whose brightnessComponent is valid.
+    func testHighlightedPreviewThemeBackgroundIsBrightnessSafe() {
+        for drawsBackground in [true, false] {
+            let resolved = HighlightedSourceEditorCore.resolvedThemeBackground(
+                background: .textBackgroundColor, // dynamic catalog color, as a real theme supplies
+                drawsBackground: drawsBackground
+            )
+            // Reading brightnessComponent is exactly what crashed; it must return a real
+            // value instead of trapping.
+            XCTAssertTrue(
+                resolved.brightnessComponent.isFinite,
+                "resolved theme background must be brightness-safe (drawsBackground=\(drawsBackground))"
+            )
+        }
+
+        // The transparent path (drawsBackground == false collapses to .clear) must also be safe.
+        let clearResolved = HighlightedSourceEditorCore.resolvedThemeBackground(
+            background: .clear,
+            drawsBackground: false
+        )
+        XCTAssertTrue(clearResolved.brightnessComponent.isFinite)
+    }
+
     func testSyntaxLanguageDetectorReevaluatesWhenFileGrowsPastHighlightLimit() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -249,6 +277,74 @@ final class FilePreviewReviewFeedbackTests: XCTestCase {
             for: url,
             currentContentUTF8ByteCount: "let value = 1\n".utf8.count
         ))
+    }
+
+    func testSyntaxLanguageDetectorRedetectsAfterCurrentTextFallsBackUnderHighlightLimit() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("swift")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let smallProgram = "let value = 1\n"
+        try smallProgram.write(to: url, atomically: true, encoding: .utf8)
+
+        XCTAssertNotNil(SyntaxLanguageDetector.language(
+            for: url,
+            currentContentUTF8ByteCount: smallProgram.utf8.count
+        ))
+        XCTAssertNil(SyntaxLanguageDetector.language(
+            for: url,
+            currentContentUTF8ByteCount: 501_000
+        ))
+        XCTAssertNotNil(SyntaxLanguageDetector.language(
+            for: url,
+            currentContentUTF8ByteCount: smallProgram.utf8.count
+        ))
+    }
+
+    func testHighlightedPreviewRouteStaysMountedAndDisablesSyntaxForUnsavedLargeEdit() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("swift")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try "let value = 1\n".write(to: url, atomically: true, encoding: .utf8)
+        let panel = FilePreviewPanel(workspaceId: UUID(), filePath: url.path)
+        defer { panel.close() }
+        await panel.loadTextContent().value
+
+        XCTAssertNotNil(panel.highlightedTextLanguage)
+        XCTAssertNotEqual(panel.highlightedTextLanguage?.id, .plainText)
+
+        panel.updateTextContent(String(repeating: "a", count: 501_000))
+
+        XCTAssertEqual(panel.textContentUTF8ByteCount, .some(501_000))
+        XCTAssertNotNil(panel.highlightedTextLanguage)
+        XCTAssertEqual(panel.highlightedTextLanguage?.id, .plainText)
+
+        panel.updateTextContent("let value = 2\n")
+
+        XCTAssertNotNil(panel.highlightedTextLanguage)
+        XCTAssertNotEqual(panel.highlightedTextLanguage?.id, .plainText)
+    }
+
+    func testHighlightedPreviewRouteReevaluatesOnReloadedLargeContent() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("swift")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try "let value = 1\n".write(to: url, atomically: true, encoding: .utf8)
+        let panel = FilePreviewPanel(workspaceId: UUID(), filePath: url.path)
+        defer { panel.close() }
+        await panel.loadTextContent().value
+        XCTAssertNotNil(panel.highlightedTextLanguage)
+
+        try Data(repeating: 65, count: 501_000).write(to: url, options: .atomic)
+        await panel.loadTextContent().value
+
+        XCTAssertEqual(panel.textContentUTF8ByteCount, .some(501_000))
+        XCTAssertNil(panel.highlightedTextLanguage)
     }
 
     func testExtensionlessUTF16TextWithBOMResolvesAsTextAfterSniffing() throws {

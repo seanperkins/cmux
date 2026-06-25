@@ -2,6 +2,7 @@ import AppKit
 import CodeEditLanguages
 import CodeEditSourceEditor
 import CodeEditTextView
+import Observation
 import SwiftUI
 
 // MARK: - Text storage + focus + zoom bridge
@@ -17,46 +18,37 @@ import SwiftUI
 // The bridge also implements TextViewCoordinator to register the TextView with
 // FilePreviewFocusCoordinator (keyboard focus) and manage the zoom event monitor.
 
-/// Runs `body` on the main actor. CodeEditSourceEditor's coordinator callbacks
-/// are declared `nonisolated` but documented to fire on the main thread. This
-/// runs synchronously in that (normal) case, and falls back to an async hop
-/// rather than trapping — as bare `MainActor.assumeIsolated` would — if a future
-/// library version ever invokes them off the main thread.
-private func runOnMainActor(_ body: @MainActor @escaping () -> Void) {
-    if Thread.isMainThread {
-        MainActor.assumeIsolated(body)
-    } else {
-        DispatchQueue.main.async { MainActor.assumeIsolated(body) }
-    }
-}
-
 @MainActor
-final class HighlightedEditorBridge: NSObject, @preconcurrency NSTextStorageDelegate, ObservableObject {
+@Observable
+final class HighlightedEditorBridge: NSObject, @preconcurrency NSTextStorageDelegate {
     static let defaultFontSize: CGFloat = 13
     static let minFontSize: CGFloat = 8
     static let maxFontSize: CGFloat = 36
 
+    @ObservationIgnored
     let storage = NSTextStorage()
-    @Published private(set) var fontSize: CGFloat = defaultFontSize
-    @Published private(set) var themeBackground: NSColor = .textBackgroundColor
-    @Published private(set) var themeForeground: NSColor = .textColor
-    @Published private(set) var drawsBackground: Bool = true
-    /// Whether long lines soft-wrap. Mirrors the persisted `fileEditor.wordWrap`
-    /// setting so the syntax-highlighted editor honors it identically to the plain
-    /// fallback editor; updates apply live via the observing SwiftUI core.
-    @Published private(set) var wrapLines: Bool = false
+    private(set) var fontSize: CGFloat = defaultFontSize
+    private(set) var themeBackground: NSColor = .textBackgroundColor
+    private(set) var themeForeground: NSColor = .textColor
+    private(set) var drawsBackground: Bool = true
+    private(set) var wrapLines: Bool = false
+    private(set) var language: CodeLanguage = SyntaxLanguageDetector.plainTextLanguage
+    @ObservationIgnored
     private(set) var isApplyingExternalUpdate = false
 
+    @ObservationIgnored
     weak var panel: FilePreviewPanel? {
         didSet {
             guard oldValue !== panel else { return }
             registerFocusIfReady()
         }
     }
+    @ObservationIgnored
     private weak var textController: TextViewController? {
         didSet {
             guard oldValue !== textController else { return }
             registerFocusIfReady()
+            installEventMonitorIfReady()
         }
     }
 
@@ -80,8 +72,12 @@ final class HighlightedEditorBridge: NSObject, @preconcurrency NSTextStorageDele
         if self.drawsBackground != draws { self.drawsBackground = draws }
     }
 
-    func updateWrapLinesIfNeeded(_ wrap: Bool) {
+    func setWrapLines(_ wrap: Bool) {
         if wrapLines != wrap { wrapLines = wrap }
+    }
+
+    func setLanguage(_ language: CodeLanguage) {
+        if self.language != language { self.language = language }
     }
 
     func adjustFontSize(by factor: CGFloat) {
@@ -105,11 +101,17 @@ final class HighlightedEditorBridge: NSObject, @preconcurrency NSTextStorageDele
     // from @MainActor install/remove methods. NSLock serializes the read-check-remove-nil
     // sequence so the token is never passed to NSEvent.removeMonitor twice.
     // nonisolated(unsafe) is justified because every access goes through eventMonitorLock.
+    @ObservationIgnored
     private let eventMonitorLock = NSLock()
+    @ObservationIgnored
     private nonisolated(unsafe) var localEventMonitor: Any?
+    @ObservationIgnored
     private nonisolated(unsafe) var coordinatorDestroyed = false
+    @ObservationIgnored
     private weak var innerScrollView: NSScrollView?
+    @ObservationIgnored
     private var pendingSaveChordPrefix: ShortcutStroke?
+    @ObservationIgnored
     private var isVisibleInUI = true
 
     func installLocalEventMonitor(scrollView: NSScrollView) {
@@ -156,11 +158,19 @@ final class HighlightedEditorBridge: NSObject, @preconcurrency NSTextStorageDele
         let alreadyInstalled = localEventMonitor != nil
         let destroyed = coordinatorDestroyed
         eventMonitorLock.unlock()
+        let scrollView = innerScrollView ?? textController?.scrollView
         guard isVisibleInUI,
-              let sv = innerScrollView,
+              let scrollView,
               !alreadyInstalled,
               !destroyed else { return }
-        installLocalEventMonitor(scrollView: sv)
+        installLocalEventMonitor(scrollView: scrollView)
+    }
+
+    /// Install the zoom/save event monitor if CodeEdit has finished loading its scroll view.
+    func installEventMonitorIfReady() {
+        guard !isCoordinatorDestroyed(),
+              let scrollView = textController?.scrollView else { return }
+        installLocalEventMonitor(scrollView: scrollView)
     }
 
     func setVisibleInUI(_ visible: Bool) {
@@ -331,14 +341,16 @@ private extension NSColor {
 
 extension HighlightedEditorBridge: TextViewCoordinator {
     nonisolated func prepareCoordinator(controller: TextViewController) {
-        runOnMainActor { [self] in
+        MainActor.assumeIsolated {
             guard !isCoordinatorDestroyed() else { return }
             textController = controller
-            // CodeEditSourceEditor calls prepareCoordinator during the controller's
-            // init, before loadView, so scrollView (an IUO) may still be nil here.
-            if let scrollView = controller.scrollView {
-                installLocalEventMonitor(scrollView: scrollView)
-            }
+            // `controller.scrollView` is an implicitly-unwrapped optional that
+            // TextViewController only assigns in loadView(). prepareCoordinator is
+            // invoked from inside TextViewController.init — before loadView() runs —
+            // so the scroll view can still be nil here. Install immediately only if
+            // it already exists; the container/update lifecycle retries once the
+            // view hierarchy exists.
+            installEventMonitorIfReady()
         }
     }
 
@@ -358,7 +370,7 @@ extension HighlightedEditorBridge: TextViewCoordinator {
 
 extension HighlightedEditorBridge: TextViewDelegate {
     nonisolated func textView(_ textView: TextView, didReplaceContentsIn range: NSRange, with string: String) {
-        runOnMainActor { [self] in
+        MainActor.assumeIsolated {
             applyUserEditedText(textView.string)
         }
     }
@@ -373,20 +385,10 @@ final class HighlightedEditorContainerView: NSView {
     var hostView: NSHostingView<HighlightedSourceEditorCore>?
 
     private let bridge: HighlightedEditorBridge
-    // Tracks the language currently driving the SwiftUI core so updateNSView can
-    // rebuild the hosting view when the same surface is reused for a file of a
-    // different language (otherwise the new file keeps the old highlighter).
-    private var currentLanguageID: TreeSitterLanguage?
 
     init(bridge: HighlightedEditorBridge) {
         self.bridge = bridge
         super.init(frame: .zero)
-    }
-
-    func setLanguageIfNeeded(_ language: CodeLanguage) {
-        guard currentLanguageID != language.id else { return }
-        currentLanguageID = language.id
-        hostView?.rootView = HighlightedSourceEditorCore(bridge: bridge, language: language)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -401,6 +403,7 @@ final class HighlightedEditorContainerView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         bridge.retryPendingFocus()
+        bridge.reinstallLocalEventMonitorIfNeeded()
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -411,17 +414,16 @@ final class HighlightedEditorContainerView: NSView {
     }
 }
 
-// MARK: - SwiftUI core (stable - created once, updated via @Published on bridge)
+// MARK: - SwiftUI core (stable - created once, updated via @Observable bridge)
 
 struct HighlightedSourceEditorCore: View {
-    @ObservedObject var bridge: HighlightedEditorBridge
-    let language: CodeLanguage
+    let bridge: HighlightedEditorBridge
     @State private var editorState = SourceEditorState()
 
     var body: some View {
         SourceEditor(
             bridge.storage,
-            language: language,
+            language: bridge.language,
             configuration: makeConfiguration(),
             state: $editorState,
             coordinators: [bridge]
@@ -434,29 +436,22 @@ struct HighlightedSourceEditorCore: View {
                 theme: makeSyntaxTheme(),
                 font: .monospacedSystemFont(ofSize: bridge.fontSize, weight: .regular),
                 wrapLines: bridge.wrapLines
-            ),
-            // A read-only file preview needs neither the minimap nor the folding
-            // ribbon. Hiding the minimap also keeps MinimapView.setTheme (which
-            // calls NSColor.brightnessComponent) off the hot path; the colors are
-            // sRGB-normalized in makeSyntaxTheme as the actual safety net. Note the
-            // folding ribbon being hidden does NOT stop fold *calculation* — the
-            // LineFoldCalculator range trap is fixed in the package itself.
-            peripherals: .init(
-                showMinimap: false,
-                showFoldingRibbon: false
             )
         )
     }
 
     private func makeSyntaxTheme() -> EditorTheme {
-        // CodeEditSourceEditor (e.g. MinimapView.setTheme) calls
-        // NSColor.brightnessComponent on theme.background, which throws for any
-        // color not in an RGB-compatible colorspace (catalog colors and .clear).
-        // Normalize to sRGB up front so every derived color is safe.
-        let fg = (bridge.themeForeground.usingColorSpace(.sRGB)) ?? bridge.themeForeground
-        let bg = bridge.drawsBackground
-            ? ((bridge.themeBackground.usingColorSpace(.sRGB)) ?? bridge.themeBackground)
-            : NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0)
+        // CodeEditSourceEditor (MinimapView.setTheme, ReformattingGuideView) reads
+        // `theme.background.brightnessComponent` with no colorspace conversion, and
+        // `-[NSColor brightnessComponent]` throws for catalog/dynamic colors such as
+        // .textColor / .textBackgroundColor / .clear. Resolve every theme color into
+        // sRGB up front so brightness extraction is always valid and the editor can't
+        // crash while applying the theme.
+        let fg = bridge.themeForeground.usingColorSpace(.sRGB) ?? NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+        let bg = Self.resolvedThemeBackground(
+            background: bridge.themeBackground,
+            drawsBackground: bridge.drawsBackground
+        )
         // Always derive light/dark from the actual theme background, never from the
         // resolved clear color, otherwise transparent dark terminals would get the
         // light syntax palette.
@@ -507,6 +502,19 @@ struct HighlightedSourceEditorCore: View {
         let luminance = 0.2126 * rgb.redComponent + 0.7152 * rgb.greenComponent + 0.0722 * rgb.blueComponent
         return luminance < 0.5
     }
+
+    /// Resolve the editor's background color into a colorspace where
+    /// `brightnessComponent` is valid.
+    ///
+    /// CodeEditSourceEditor (MinimapView.setTheme / ReformattingGuideView) reads
+    /// `theme.background.brightnessComponent` without converting first, and that selector
+    /// traps for catalog/dynamic/`.clear` colors — which crashed the highlighted preview
+    /// the moment it opened. Always hand the editor a concrete sRGB color. `internal
+    /// static` so it can be covered by a regression test.
+    static func resolvedThemeBackground(background: NSColor, drawsBackground: Bool) -> NSColor {
+        let raw = drawsBackground ? background : NSColor.clear
+        return raw.usingColorSpace(.sRGB) ?? NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0)
+    }
 }
 
 // MARK: - Highlighted file preview NSViewRepresentable
@@ -526,15 +534,15 @@ struct HighlightedFilePreviewEditor: NSViewRepresentable {
         let bridge = context.coordinator
         bridge.setVisibleInUI(isVisibleInUI)
         bridge.updateThemeIfNeeded(background: themeBackgroundColor, foreground: themeForegroundColor, drawsBackground: drawsBackground)
-        bridge.updateWrapLinesIfNeeded(wordWrap)
+        bridge.setWrapLines(wordWrap)
+        bridge.setLanguage(language)
 
         let container = HighlightedEditorContainerView(bridge: bridge)
         container.isHidden = !isVisibleInUI
 
-        let hostView = NSHostingView(rootView: HighlightedSourceEditorCore(bridge: bridge, language: language))
+        let hostView = NSHostingView(rootView: HighlightedSourceEditorCore(bridge: bridge))
         container.addSubview(hostView)
         container.hostView = hostView
-        container.setLanguageIfNeeded(language)
 
         bridge.setContent(panel.textContent)
         return container
@@ -545,15 +553,14 @@ struct HighlightedFilePreviewEditor: NSViewRepresentable {
         container.isHidden = !isVisibleInUI
         bridge.setVisibleInUI(isVisibleInUI)
         bridge.panel = panel
-        // Rebuild the SwiftUI core if the surface is now showing a different
-        // language; the language is otherwise captured once at makeNSView time.
-        container.setLanguageIfNeeded(language)
         bridge.setContent(panel.textContent)
         bridge.updateThemeIfNeeded(background: themeBackgroundColor, foreground: themeForegroundColor, drawsBackground: drawsBackground)
-        bridge.updateWrapLinesIfNeeded(wordWrap)
+        bridge.setWrapLines(wordWrap)
+        bridge.setLanguage(language)
     }
 
     static func dismantleNSView(_ container: HighlightedEditorContainerView, coordinator: HighlightedEditorBridge) {
+        coordinator.setVisibleInUI(false)
         coordinator.destroy()
     }
 }

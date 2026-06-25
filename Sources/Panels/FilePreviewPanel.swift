@@ -2,6 +2,7 @@ import AppKit
 import AVKit
 import Bonsplit
 import Combine
+import CodeEditLanguages
 import Foundation
 import PDFKit
 import Quartz
@@ -1006,6 +1007,7 @@ final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPan
     @Published private(set) var isFileUnavailable = false
     @Published private(set) var textContent = ""
     @Published private(set) var textContentUTF8ByteCount: Int?
+    @Published private(set) var highlightedTextLanguage: CodeLanguage?
     @Published private(set) var isDirty = false
     @Published private(set) var isSaving = false
     @Published private(set) var focusFlashToken = 0
@@ -1043,6 +1045,9 @@ final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPan
         let initialPreviewMode = FilePreviewKindResolver.initialMode(for: fileURL)
         self.previewMode = initialPreviewMode
         self.displayIcon = FilePreviewKindResolver.iconName(for: initialPreviewMode)
+        self.highlightedTextLanguage = initialPreviewMode == .text
+            ? SyntaxLanguageDetector.language(for: fileURL)
+            : nil
         self.focusCoordinator = FilePreviewFocusCoordinator(
             preferredIntent: Self.defaultFocusIntent(for: initialPreviewMode)
         )
@@ -1181,13 +1186,34 @@ final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPan
 
     func updateTextContent(_ nextContent: String) {
         guard textContent != nextContent else { return }
+        let wasUsingHighlightedEditor = highlightedTextLanguage != nil
         setTextContent(nextContent)
+        refreshHighlightedTextLanguageForEditedContent(wasUsingHighlightedEditor: wasUsingHighlightedEditor)
         isDirty = nextContent != originalTextContent
     }
 
     private func setTextContent(_ nextContent: String) {
         textContent = nextContent
         textContentUTF8ByteCount = nextContent.utf8.count
+    }
+
+    private func refreshHighlightedTextLanguageForLoadedContent() {
+        guard previewMode == .text, !isFileUnavailable else {
+            highlightedTextLanguage = nil
+            return
+        }
+        highlightedTextLanguage = SyntaxLanguageDetector.language(
+            for: fileURL,
+            currentContentUTF8ByteCount: textContentUTF8ByteCount
+        )
+    }
+
+    private func refreshHighlightedTextLanguageForEditedContent(wasUsingHighlightedEditor: Bool) {
+        guard wasUsingHighlightedEditor else { return }
+        highlightedTextLanguage = SyntaxLanguageDetector.language(
+            for: fileURL,
+            currentContentUTF8ByteCount: textContentUTF8ByteCount
+        ) ?? SyntaxLanguageDetector.plainTextLanguage
     }
 
     private func prepareContentForPreviewMode() {
@@ -1217,6 +1243,9 @@ final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPan
         guard previewMode != mode else { return }
         if mode != .text {
             textLoadGeneration += 1
+            highlightedTextLanguage = nil
+        } else {
+            highlightedTextLanguage = SyntaxLanguageDetector.language(for: fileURL)
         }
         previewMode = mode
         displayIcon = FilePreviewKindResolver.iconName(for: mode)
@@ -1258,6 +1287,7 @@ final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPan
             originalTextContent = ""
             isDirty = false
             isFileUnavailable = true
+            refreshHighlightedTextLanguageForLoadedContent()
             return
         case .loaded(let content, let encoding):
             if !replacingDirtyContent && isDirty {
@@ -1271,6 +1301,7 @@ final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPan
             textEncoding = encoding
             isDirty = false
             isFileUnavailable = false
+            refreshHighlightedTextLanguageForLoadedContent()
         }
     }
 
@@ -1280,7 +1311,9 @@ final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPan
         guard !isSaving else { return nil }
         let currentContent = textInsertionTarget?.filePreviewCurrentText ?? textContent
         guard currentContent != originalTextContent else {
+            let wasUsingHighlightedEditor = highlightedTextLanguage != nil
             setTextContent(currentContent)
+            refreshHighlightedTextLanguageForEditedContent(wasUsingHighlightedEditor: wasUsingHighlightedEditor)
             isDirty = false
             return nil
         }
@@ -1288,7 +1321,9 @@ final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPan
         textLoadGeneration += 1
         saveGeneration += 1
         let generation = saveGeneration
+        let wasUsingHighlightedEditor = highlightedTextLanguage != nil
         setTextContent(currentContent)
+        refreshHighlightedTextLanguageForEditedContent(wasUsingHighlightedEditor: wasUsingHighlightedEditor)
         isSaving = true
         activeSaveGeneration = generation
         let fileURL = fileURL

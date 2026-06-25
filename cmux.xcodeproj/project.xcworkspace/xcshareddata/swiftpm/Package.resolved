@@ -1,5 +1,5 @@
 {
-  "originHash" : "f875478b734d1fab9bd78ec660d67cad5ec5a491b8f3711645998e5651f73eb2",
+  "originHash" : "f2c51f9edbba440a62dc9b40e145f0efa8eca187472c2bd396a611085a63fbcc",
   "pins" : [
     {
       "identity" : "aexml",
@@ -22,9 +22,9 @@
     {
       "identity" : "codeeditsourceeditor",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/seanperkins/CodeEditSourceEditor",
+      "location" : "https://github.com/manaflow-ai/CodeEditSourceEditor",
       "state" : {
-        "revision" : "d8beae7485d0c3b96659b819de3cbecc186226e0"
+        "revision" : "c8bcf1970551394eb82153725f97c5b4d985dc13"
       }
     },
     {
@@ -113,8 +113,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-asn1.git",
       "state" : {
-        "revision" : "a9a5efd40eaf558a2bcd48d64b1d1646be686008",
-        "version" : "1.7.1"
+        "revision" : "eb50cbd14606a9161cbc5d452f18797c90ef0bab",
+        "version" : "1.7.0"
       }
     },
     {
@@ -131,8 +131,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-collections.git",
       "state" : {
-        "revision" : "fea17c02d767f46b23070fdfdacc28a03a39232a",
-        "version" : "1.5.1"
+        "revision" : "a0cb0954ecb21e4e31b0070e6ed5674e8556685a",
+        "version" : "1.6.0"
       }
     },
     {
@@ -212,8 +212,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/tuist/XcodeProj.git",
       "state" : {
-        "revision" : "621eca8d091cc110a99adc23bb0d6618a65b4544",
-        "version" : "9.13.0"
+        "revision" : "fb79d68bc758cdb00079d72b6c8b899d99f5f15e",
+        "version" : "9.12.0"
       }
     }
   ],

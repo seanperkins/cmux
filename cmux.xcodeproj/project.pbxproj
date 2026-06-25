@@ -2581,6 +2581,8 @@
 				64D7B3C5A409C0B3EDD002CE /* FilePreviewMediaSession.swift */,
 				0A02623202562490B3E88372 /* FilePreviewQuickLookSession.swift */,
 				D0B10017A1B2C3D4E5F60001 /* FilePreviewTextEditor.swift */,
+				C0DE5EDEC0DE5EDE00000020 /* SyntaxLanguageDetector.swift */,
+				C0DE5EDEC0DE5EDE00000030 /* HighlightedFilePreviewEditor.swift */,
 				A5001451A5001451A5001451 /* FilePreviewNativeBackground.swift */,
 				A5001442A5001442A5001442 /* FilePreviewModeSupport.swift */,
 				A5001444A5001444A5001444 /* FilePreviewWorkspaceOpenSupport.swift */,
@@ -3098,6 +3100,8 @@
 				C750300000000000000000A2 /* CmuxTerminalEngine */,
 				C750400000000000000000A2 /* CmuxTerminalServices */,
 				A8BD195031FC4B82B4354297 /* StackAuth */,
+				C0DE5EDEC0DE5EDE00000002 /* CodeEditSourceEditor */,
+				C0DE5EDEC0DE5EDE00000012 /* CodeEditLanguages */,
 				EFB18E3B3099DFE2ECA3C263 /* CMUXMobileCore */,
 			);
 			productName = cmux;
@@ -3301,6 +3305,8 @@
 				CC0DE20000000000000000A1 /* XCLocalSwiftPackageReference "CmuxRemoteWorkspace" */,
 				CC0DE30000000000000000A1 /* XCLocalSwiftPackageReference "CmuxRemoteSession" */,
 				28B798BB9086C8E6B60C3355 /* XCLocalSwiftPackageReference "stack-auth-swift-sdk-prerelease" */,
+				C0DE5EDEC0DE5EDE00000001 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */,
+				C0DE5EDEC0DE5EDE00000011 /* XCRemoteSwiftPackageReference "CodeEditLanguages" */,
 				0C69E6A5FA9B0513E68DF443 /* XCLocalSwiftPackageReference "CMUXMobileCore" */,
 			);
 			productRefGroup = A5001042 /* Products */;
@@ -4994,22 +5000,6 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		C0DE5EDEC0DE5EDE00000001 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/seanperkins/CodeEditSourceEditor";
-			requirement = {
-				kind = revision;
-				revision = d8beae7485d0c3b96659b819de3cbecc186226e0;
-			};
-		};
-		C0DE5EDEC0DE5EDE00000011 /* XCRemoteSwiftPackageReference "CodeEditLanguages" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/CodeEditApp/CodeEditLanguages";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.1.20;
-			};
-		};
 		A5001232 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/sparkle-project/Sparkle";
@@ -5040,6 +5030,22 @@
 			requirement = {
 				kind = upToNextMajorVersion;
 				minimumVersion = 2.4.1;
+			};
+		};
+		C0DE5EDEC0DE5EDE00000001 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/manaflow-ai/CodeEditSourceEditor";
+			requirement = {
+				kind = revision;
+				revision = c8bcf1970551394eb82153725f97c5b4d985dc13;
+			};
+		};
+		C0DE5EDEC0DE5EDE00000011 /* XCRemoteSwiftPackageReference "CodeEditLanguages" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/CodeEditApp/CodeEditLanguages";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.1.20;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
