@@ -1645,7 +1645,11 @@ extension Workspace {
             panelGitBranches.removeValue(forKey: panelId)
         }
 
-        surfaceListeningPorts[panelId] = Array(Set(snapshot.listeningPorts)).sorted()
+        // Listening ports are ephemeral runtime state: the snapshot's listeners are
+        // usually dead by relaunch, and a panel running a fullscreen agent never
+        // re-registers with PortScanner to correct them. Live listeners re-badge on
+        // the first scan burst, so restoring nothing is strictly more accurate.
+        surfaceListeningPorts.removeValue(forKey: panelId)
 
         if let ttyName = snapshot.ttyName?.trimmingCharacters(in: .whitespacesAndNewlines), !ttyName.isEmpty {
             surfaceTTYNames[panelId] = ttyName
