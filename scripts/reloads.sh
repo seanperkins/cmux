@@ -143,11 +143,42 @@ if [[ -n "$TAG" ]]; then
   fi
 fi
 
+# Minimal entitlements for a locally dev-signed staging build: just the
+# team-prefixed keychain access group, which an auto-provisioned development
+# profile will accept. Auto-created if missing so a fresh checkout needs no
+# manual setup. Override the location via CMUX_STAGING_ENTITLEMENTS.
+STAGING_ENTITLEMENTS="${CMUX_STAGING_ENTITLEMENTS:-$HOME/Library/Application Support/cmux/staging.entitlements}"
+if [[ ! -f "$STAGING_ENTITLEMENTS" ]]; then
+  mkdir -p "$(dirname "$STAGING_ENTITLEMENTS")"
+  cat > "$STAGING_ENTITLEMENTS" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)$(CFBundleIdentifier)</string>
+    </array>
+</dict>
+</plist>
+PLIST
+  echo "==> Created staging entitlements at $STAGING_ENTITLEMENTS"
+fi
+
 XCODEBUILD_ARGS=(
   -project cmux.xcodeproj
   -scheme cmux
   -configuration Release
   -destination 'platform=macOS'
+  -allowProvisioningUpdates
+  DEVELOPMENT_TEAM="${CMUX_DEV_TEAM:-HH3SJBAS42}"
+  CODE_SIGN_STYLE=Automatic
+  CODE_SIGN_ENTITLEMENTS="$STAGING_ENTITLEMENTS"
+  ONLY_ACTIVE_ARCH=YES
+  # Pink/red app icon so the STAGING build is visually distinct from production
+  # cmux in the Dock, Finder, and Cmd-Tab. AppIcon-Staging is a hue-shifted
+  # variant of AppIcon in Assets.xcassets (same mechanism as AppIcon-Debug).
+  ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon-Staging
 )
 if [[ -n "$DERIVED_DATA" ]]; then
   XCODEBUILD_ARGS+=(-derivedDataPath "$DERIVED_DATA")
@@ -246,7 +277,29 @@ if [[ -f "$INFO_PLIST" ]]; then
   if [[ -S "$CMUX_SOCKET_PATH_VALUE" ]]; then
     rm -f "$CMUX_SOCKET_PATH_VALUE"
   fi
-  /usr/bin/codesign --force --sign - --timestamp=none --generate-entitlement-der "$STAGING_APP_PATH" >/dev/null 2>&1 || true
+  # Ad-hoc signing entitlements for the staging app: ONLY get-task-allow, which an
+  # ad-hoc binary may carry without a provisioning profile. We deliberately do NOT
+  # reuse the built app's entitlements: xcodebuild bakes in restricted keys
+  # (keychain-access-groups, application-identifier, team-identifier) that REQUIRE a
+  # provisioning profile. The auto-generated "Mac Team Provisioning Profile" expires
+  # 7 days after each build, after which AMFI refuses to launch the app ("can't be
+  # opened"; amfid Code=-413 "No matching profile found"). Signing ad-hoc with no
+  # restricted entitlements removes the profile dependency entirely, so the staging
+  # build keeps launching indefinitely. Trade-off: the app uses the ad-hoc default
+  # keychain access group, so its auth tokens re-save once after switching modes.
+  STAGING_APP_ENT_TMP="$(mktemp -t cmux-staging-ent).plist"
+  cat > "$STAGING_APP_ENT_TMP" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.get-task-allow</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+  # Drop the soon-to-expire auto-generated provisioning profile; ad-hoc needs none.
+  rm -f "$STAGING_APP_PATH/Contents/embedded.provisionprofile"
 fi
 APP_PATH="$STAGING_APP_PATH"
 
@@ -266,6 +319,79 @@ if [[ -x "$CMUXD_SRC" ]]; then
   cp "$CMUXD_SRC" "$BIN_DIR/cmuxd"
   chmod +x "$BIN_DIR/cmuxd"
 fi
+
+# Inside-out re-sign now that Resources/bin is fully populated (incl. cmuxd).
+# The staging app is ALWAYS signed ad-hoc. A dev-cert (Apple Development)
+# signature embeds a "Mac Team Provisioning Profile" that expires 7 days after
+# every build; once it lapses, AMFI refuses to launch the app ("can't be opened";
+# amfid Code=-413 "No matching profile found") — the weekly-recurring breakage
+# this path used to cause. Ad-hoc signing carries no profile and never expires.
+# Nested CLI helpers are signed ad-hoc with NO entitlements (the app-level
+# get-task-allow is harmless but pointless on a helper); the app bundle is signed
+# ad-hoc with the minimal get-task-allow entitlements written above.
+
+sign_staging_helpers() {
+  local helper
+  for helper in "$APP_PATH/Contents/Resources/bin"/*; do
+    [[ -f "$helper" && -x "$helper" ]] || continue
+    /usr/bin/file -b "$helper" | grep -q "Mach-O" || continue
+    /usr/bin/codesign --force --options runtime --timestamp=none --sign - "$helper" >/dev/null 2>&1 || true
+  done
+}
+
+# Ad-hoc sign nested helpers + the app bundle, then VERIFY the seal. Returns 0
+# only if the resulting signature validates, so a swallowed codesign failure can
+# never ship an unlaunchable, AMFI-killed bundle. Diagnostic output from a failed
+# sign is surfaced (not redirected to /dev/null) so a future breakage is
+# debuggable from the reloads.sh log.
+sign_and_verify_staging_app() {
+  local sign_err
+  sign_staging_helpers
+  if [[ -s "${STAGING_APP_ENT_TMP:-}" ]]; then
+    sign_err="$(/usr/bin/codesign --force --sign - --timestamp=none --generate-entitlement-der --entitlements "$STAGING_APP_ENT_TMP" "$APP_PATH" 2>&1)" \
+      || { echo "$sign_err" >&2; return 1; }
+  else
+    sign_err="$(/usr/bin/codesign --force --sign - --timestamp=none --generate-entitlement-der "$APP_PATH" 2>&1)" \
+      || { echo "$sign_err" >&2; return 1; }
+  fi
+  /usr/bin/codesign --verify --verbose=2 "$APP_PATH" >/dev/null 2>&1
+}
+
+CMUX_SIGNED_OK=0
+if sign_and_verify_staging_app; then
+  echo "==> Signed staging app ad-hoc (no provisioning profile; never expires)"
+  CMUX_SIGNED_OK=1
+fi
+rm -f "${STAGING_APP_ENT_TMP:-}"
+if [[ "$CMUX_SIGNED_OK" -eq 0 ]]; then
+  echo "error: failed to produce a valid code signature for $APP_PATH" >&2
+  echo "       The app would be SIGKILLed by AMFI on launch (\"can't be opened\")." >&2
+  echo "       codesign --verify output:" >&2
+  /usr/bin/codesign --verify --verbose=2 "$APP_PATH" >&2 || true
+  exit 1
+fi
+
+# Install the freshly-signed staging app to a stable, canonical location in
+# /Applications and launch THAT, so Spotlight, the Dock, and `open -b <bundle id>`
+# always resolve to this build. Otherwise reloads.sh builds, signs, and launches
+# entirely inside DerivedData (build scratch that Xcode "Clean" wipes), while any
+# hand-dragged /Applications copy goes stale; Spotlight prefers /Applications, so
+# it launches the stale bundle, which AMFI SIGKILLs ("can't be opened"). ditto
+# preserves the code signature produced above, so the installed copy stays valid
+# without re-signing. If install fails for any reason, fall back to launching the
+# DerivedData build (previous behavior) rather than failing the reload.
+INSTALLED_APP_PATH="/Applications/${APP_NAME}.app"
+if rm -rf "$INSTALLED_APP_PATH" 2>/dev/null && ditto "$APP_PATH" "$INSTALLED_APP_PATH" 2>/dev/null \
+  && /usr/bin/codesign --verify --verbose=2 "$INSTALLED_APP_PATH" >/dev/null 2>&1; then
+  LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+  [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -f "$INSTALLED_APP_PATH" >/dev/null 2>&1 || true
+  APP_PATH="$INSTALLED_APP_PATH"
+  echo "==> Installed staging app to $INSTALLED_APP_PATH"
+else
+  rm -rf "$INSTALLED_APP_PATH" 2>/dev/null || true
+  echo "==> warning: could not install a valid copy to $INSTALLED_APP_PATH; launching DerivedData build instead" >&2
+fi
+
 # Avoid inheriting cmux/ghostty environment variables from the terminal that
 # runs this script (often inside another cmux instance), which can cause
 # socket and resource-path conflicts.
