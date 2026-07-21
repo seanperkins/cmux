@@ -195,6 +195,51 @@ final class MarkdownPanelTests: XCTestCase {
         XCTAssertEqual(panel.fontFamily, "Avenir Next")
     }
 
+    /// Markdown files must route the TextEdit mode to the highlighted editor:
+    /// the panel exposes a detected language for `.md`, which is what
+    /// `HighlightedFilePreviewRouter` keys on.
+    func testMarkdownPanelExposesHighlightedLanguageForMarkdownFiles() throws {
+        let fileManager = FileManager.default
+        let directoryURL = fileManager.temporaryDirectory
+            .appendingPathComponent("cmux-markdown-highlight-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        let fileURL = directoryURL.appendingPathComponent("README.md")
+        try "# hello".write(to: fileURL, atomically: true, encoding: .utf8)
+        defer { try? fileManager.removeItem(at: directoryURL) }
+
+        let panel = MarkdownPanel(workspaceId: UUID(), filePath: fileURL.path, fontSize: 15)
+        defer { panel.close() }
+
+        XCTAssertNotNil(panel.highlightedTextLanguage)
+    }
+
+    /// Saving must prefer the highlighted editor's live text when it is the
+    /// attached insertion target (the CodeEdit editor is not an `NSTextView`,
+    /// so the `textView` fallback never sees its edits).
+    func testSavePrefersAttachedInsertionTargetContent() async throws {
+        let fileManager = FileManager.default
+        let directoryURL = fileManager.temporaryDirectory
+            .appendingPathComponent("cmux-markdown-save-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        let fileURL = directoryURL.appendingPathComponent("README.md")
+        try "# hello".write(to: fileURL, atomically: true, encoding: .utf8)
+        defer { try? fileManager.removeItem(at: directoryURL) }
+
+        let panel = MarkdownPanel(workspaceId: UUID(), filePath: fileURL.path, fontSize: 15)
+        defer { panel.close() }
+
+        let editor = StubMarkdownInsertionTarget(text: "# edited in highlighted editor")
+        panel.attachTextInsertionTarget(editor)
+
+        let saveTask = try XCTUnwrap(panel.saveTextContent())
+        await saveTask.value
+
+        XCTAssertEqual(
+            try String(contentsOf: fileURL, encoding: .utf8),
+            "# edited in highlighted editor"
+        )
+    }
+
     func testFileOpenRoutesMarkdownFilesToPreviewMarkdownPanel() throws {
         let fileManager = FileManager.default
         let directoryURL = fileManager.temporaryDirectory
@@ -1571,4 +1616,23 @@ private final class MarkdownRemoteImageHoldingSchemeHandler: NSObject, WKURLSche
             task.didFailWithError(error)
         }
     }
+}
+
+/// Stands in for the highlighted editor's CodeEdit `TextView`: an insertion
+/// target that is not an `NSTextView`.
+@MainActor
+private final class StubMarkdownInsertionTarget: NSView, FilePreviewTextInsertionTarget {
+    private let text: String
+
+    init(text: String) {
+        self.text = text
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    var filePreviewCurrentText: String { text }
+    func focusFilePreviewTextTarget() {}
+    func insertFilePreviewText(_ text: String) {}
 }

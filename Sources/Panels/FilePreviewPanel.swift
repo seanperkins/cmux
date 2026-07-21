@@ -997,7 +997,7 @@ enum FilePreviewTextSaver {
 }
 
 @MainActor
-final class FilePreviewPanel: Panel, ObservableObject, FilePreviewTextEditingPanel {
+final class FilePreviewPanel: Panel, ObservableObject, HighlightedTextEditingPanel {
     let id: UUID
     let panelType: PanelType = .filePreview
     let filePath: String

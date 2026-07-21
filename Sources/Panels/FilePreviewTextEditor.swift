@@ -1,4 +1,5 @@
 import AppKit
+import CodeEditLanguages
 import SwiftUI
 
 // MARK: - Panel protocol (upstream addition)
@@ -14,10 +15,28 @@ protocol FilePreviewTextEditingPanel: AnyObject {
     func saveTextContent() -> Task<Void, Never>?
 }
 
+// MARK: - Highlighted-editor host protocol
+
+/// The extra panel surface the highlighted (CodeEdit) editor needs beyond
+/// plain text editing: the detected language that decides highlighted-vs-plain
+/// routing, text-insertion-target registration (the CodeEdit `TextView` is not
+/// an `NSTextView`, so `attachTextView` does not fit), and preview-focus
+/// registration so panel-level focus requests land in the editor.
+@MainActor
+protocol HighlightedTextEditingPanel: FilePreviewTextEditingPanel {
+    var highlightedTextLanguage: CodeLanguage? { get }
+
+    func attachTextInsertionTarget(_ target: any FilePreviewTextInsertionTarget)
+    func detachTextInsertionTarget(_ target: any FilePreviewTextInsertionTarget)
+    func attachPreviewFocus(root: NSView, primaryResponder: NSView, intent: FilePreviewPanelFocusIntent)
+    func detachPreviewFocus(root: NSView, primaryResponder: NSView, intent: FilePreviewPanelFocusIntent)
+}
+
 // MARK: - Router (chooses highlighted or plain editor based on file extension)
 
-struct HighlightedFilePreviewRouter: View {
-    @ObservedObject var panel: FilePreviewPanel
+struct HighlightedFilePreviewRouter<PanelModel>: View
+where PanelModel: ObservableObject & HighlightedTextEditingPanel {
+    @ObservedObject var panel: PanelModel
     let isVisibleInUI: Bool
     let themeBackgroundColor: NSColor
     let themeForegroundColor: NSColor
@@ -28,7 +47,7 @@ struct HighlightedFilePreviewRouter: View {
     let wordWrap: Bool
 
     init(
-        panel: FilePreviewPanel,
+        panel: PanelModel,
         isVisibleInUI: Bool,
         themeBackgroundColor: NSColor,
         themeForegroundColor: NSColor,

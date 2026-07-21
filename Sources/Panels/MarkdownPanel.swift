@@ -1,5 +1,6 @@
 import AppKit
 import CmuxFileWatch
+import CodeEditLanguages
 import Combine
 import Foundation
 
@@ -13,7 +14,7 @@ enum MarkdownPanelDisplayMode: String, CaseIterable, Identifiable {
 /// A panel that renders a markdown file with live file-watching.
 /// When the file changes on disk, the content is automatically reloaded.
 @MainActor
-final class MarkdownPanel: Panel, ObservableObject, FilePreviewTextEditingPanel {
+final class MarkdownPanel: Panel, ObservableObject, HighlightedTextEditingPanel {
     let id: UUID
     let panelType: PanelType = .markdown
 
@@ -83,6 +84,15 @@ final class MarkdownPanel: Panel, ObservableObject, FilePreviewTextEditingPanel 
     private var activeSaveGeneration: Int?
     private var pendingSearchNeedle: String?
     private weak var textView: NSTextView?
+
+    /// The active text-editor endpoint when the highlighted (CodeEdit) editor
+    /// is mounted — it is an `NSView`, not an `NSTextView`, so it registers
+    /// here instead of `textView`. Save and focus prefer this when present.
+    private weak var textInsertionTarget: (any FilePreviewTextInsertionTarget)?
+
+    /// The view that should receive first responder while the highlighted
+    /// editor is mounted (registered via `attachPreviewFocus`).
+    private weak var editorFocusResponder: NSView?
     private var isClosed: Bool = false
     // NotificationCenter token; removal is thread-safe so deinit can drop it.
     private nonisolated(unsafe) var typographyDefaultsObserver: NSObjectProtocol?
@@ -233,7 +243,11 @@ final class MarkdownPanel: Panel, ObservableObject, FilePreviewTextEditingPanel 
 
     func focus() {
         guard displayMode == .text else { return }
-        _ = textView?.window?.makeFirstResponder(textView)
+        if let editorFocusResponder {
+            _ = editorFocusResponder.window?.makeFirstResponder(editorFocusResponder)
+        } else {
+            _ = textView?.window?.makeFirstResponder(textView)
+        }
         applyPendingSearchNeedleIfPossible()
     }
 
@@ -271,6 +285,37 @@ final class MarkdownPanel: Panel, ObservableObject, FilePreviewTextEditingPanel 
         self.textView = textView
     }
 
+    // MARK: - HighlightedTextEditingPanel
+
+    /// Routes the TextEdit mode to the highlighted editor for recognized
+    /// languages (markdown included), honoring the detector's candidacy and
+    /// size caps the same way the file preview panel does.
+    var highlightedTextLanguage: CodeLanguage? {
+        SyntaxLanguageDetector.language(
+            for: URL(fileURLWithPath: filePath),
+            currentContentUTF8ByteCount: textContent.utf8.count
+        )
+    }
+
+    func attachTextInsertionTarget(_ target: any FilePreviewTextInsertionTarget) {
+        textInsertionTarget = target
+    }
+
+    func detachTextInsertionTarget(_ target: any FilePreviewTextInsertionTarget) {
+        guard textInsertionTarget === target else { return }
+        textInsertionTarget = nil
+    }
+
+    func attachPreviewFocus(root: NSView, primaryResponder: NSView, intent: FilePreviewPanelFocusIntent) {
+        guard intent == .textEditor else { return }
+        editorFocusResponder = primaryResponder
+    }
+
+    func detachPreviewFocus(root: NSView, primaryResponder: NSView, intent: FilePreviewPanelFocusIntent) {
+        guard editorFocusResponder === primaryResponder else { return }
+        editorFocusResponder = nil
+    }
+
     func retryPendingFocus() {
         focus()
     }
@@ -300,7 +345,7 @@ final class MarkdownPanel: Panel, ObservableObject, FilePreviewTextEditingPanel 
     @discardableResult
     func saveTextContent() -> Task<Void, Never>? {
         guard !isSaving else { return nil }
-        let currentContent = textView?.string ?? textContent
+        let currentContent = textInsertionTarget?.filePreviewCurrentText ?? textView?.string ?? textContent
         guard currentContent != originalTextContent else {
             textContent = currentContent
             content = currentContent

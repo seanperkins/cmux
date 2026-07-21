@@ -98,7 +98,7 @@ struct MarkdownPanelView: View {
             .accessibilityHidden(panel.displayMode != .preview)
 
             if panel.displayMode == .text {
-                FilePreviewTextEditor(
+                HighlightedFilePreviewRouter(
                     panel: panel,
                     isVisibleInUI: isVisibleInUI,
                     themeBackgroundColor: appearance.contentBackgroundColor,

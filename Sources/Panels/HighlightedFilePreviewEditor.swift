@@ -37,7 +37,7 @@ final class HighlightedEditorBridge: NSObject, @preconcurrency NSTextStorageDele
     private(set) var isApplyingExternalUpdate = false
 
     @ObservationIgnored
-    weak var panel: FilePreviewPanel? {
+    weak var panel: (any HighlightedTextEditingPanel)? {
         didSet {
             guard oldValue !== panel else { return }
             registerFocusIfReady()
@@ -519,8 +519,9 @@ struct HighlightedSourceEditorCore: View {
 
 // MARK: - Highlighted file preview NSViewRepresentable
 
-struct HighlightedFilePreviewEditor: NSViewRepresentable {
-    @ObservedObject var panel: FilePreviewPanel
+struct HighlightedFilePreviewEditor<PanelModel>: NSViewRepresentable
+where PanelModel: ObservableObject & HighlightedTextEditingPanel {
+    @ObservedObject var panel: PanelModel
     let isVisibleInUI: Bool
     let themeBackgroundColor: NSColor
     let themeForegroundColor: NSColor
