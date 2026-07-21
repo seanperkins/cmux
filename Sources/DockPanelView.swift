@@ -53,6 +53,9 @@ struct DockPanelView: View {
         .onReceive(NotificationCenter.default.publisher(for: .ghosttyConfigDidReload)) { _ in
             refreshAppearance(reason: "ghosttyConfigDidReload")
         }
+        .onReceive(NotificationCenter.default.publisher(for: PaneChromeSettings.didChangeNotification)) { _ in
+            refreshAppearance(reason: "paneChromeSettingsDidChange")
+        }
         .onReceive(NotificationCenter.default.publisher(for: .ghosttyDefaultBackgroundDidChange)) { _ in
             refreshAppearance(reason: "ghosttyDefaultBackgroundDidChange")
         }
@@ -129,6 +132,10 @@ private struct DockSplitContentView: View {
                 hasUnreadNotification: false,
                 terminalAgentContext: "",
                 paneOwnershipOverride: isVisibleInUI,
+                terminalPaneOwnershipResolver: {
+                    guard store.paneId(forPanelId: panel.id)?.id == paneId.id else { return false }
+                    return store.panelIsSelectedInVisibleDockPane(panel.id)
+                },
                 onFocus: {
                     store.bonsplitController.focusPane(paneId)
                     store.noteKeyboardFocusIntent(window: NSApp.keyWindow ?? NSApp.mainWindow)
