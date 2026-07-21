@@ -71,4 +71,34 @@ import Testing
         // Neither a text editor nor a sidebar owner: the terminal reclaims focus (existing behavior).
         #expect(!shouldRespectForeignFirstResponder(view, in: window, isRightSidebarOwner: neverSidebarOwner))
     }
+
+    /// The highlighted file-preview editor (CodeEdit's `TextView`) is an `NSView`, not an `NSText`
+    /// subclass. The policy must still yield to it, or the pre-dispatch key repair steals every
+    /// keystroke back to the terminal while the user edits: clicking places the cursor (mouse events
+    /// bypass the repair) but arrow keys and typing never reach the editor.
+    @Test func respectsInWindowFilePreviewTextInsertionTarget() {
+        let window = makeWindow()
+        let editor = StubFilePreviewEditorView(frame: .zero)
+        window.contentView?.addSubview(editor)
+        #expect(shouldRespectForeignFirstResponder(editor, in: window, isRightSidebarOwner: neverSidebarOwner))
+    }
+
+    /// A file-preview editor stranded in another window must not block the terminal, matching the
+    /// #5269 stranded-responder rule for the other focus-owner flavors.
+    @Test func reclaimsFromStrandedFilePreviewTextInsertionTarget() {
+        let windowA = makeWindow()
+        let windowB = makeWindow()
+        let editor = StubFilePreviewEditorView(frame: .zero)
+        windowB.contentView?.addSubview(editor)
+        #expect(!shouldRespectForeignFirstResponder(editor, in: windowA, isRightSidebarOwner: neverSidebarOwner))
+    }
+}
+
+/// Mirrors the highlighted file-preview editor's shape: a text-insertion target that is a plain
+/// `NSView`, not an `NSText` subclass.
+@MainActor
+private final class StubFilePreviewEditorView: NSView, FilePreviewTextInsertionTarget {
+    var filePreviewCurrentText: String { "" }
+    func focusFilePreviewTextTarget() {}
+    func insertFilePreviewText(_ text: String) {}
 }
