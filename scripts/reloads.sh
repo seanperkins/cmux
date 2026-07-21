@@ -321,21 +321,35 @@ if [[ -x "$CMUXD_SRC" ]]; then
 fi
 
 # Inside-out re-sign now that Resources/bin is fully populated (incl. cmuxd).
-# The staging app is ALWAYS signed ad-hoc. A dev-cert (Apple Development)
-# signature embeds a "Mac Team Provisioning Profile" that expires 7 days after
-# every build; once it lapses, AMFI refuses to launch the app ("can't be opened";
-# amfid Code=-413 "No matching profile found") — the weekly-recurring breakage
-# this path used to cause. Ad-hoc signing carries no profile and never expires.
-# Nested CLI helpers are signed ad-hoc with NO entitlements (the app-level
-# get-task-allow is harmless but pointless on a helper); the app bundle is signed
-# ad-hoc with the minimal get-task-allow entitlements written above.
+# The staging app must NOT carry an Apple Development signature: that embeds a
+# "Mac Team Provisioning Profile" that expires 7 days after every build; once it
+# lapses, AMFI refuses to launch the app ("can't be opened"; amfid Code=-413
+# "No matching profile found") — the weekly-recurring breakage this path used to
+# cause. Two identities avoid the profile entirely:
+#   - "Developer ID Application" (preferred when present): embeds no profile,
+#     never expires weekly, and gives the bundle a STABLE identity so Little
+#     Snitch and TCC recognize every rebuild as the same program (ad-hoc has no
+#     identity, so Little Snitch falls back to a per-build checksum and warns
+#     "the program has been modified" after every reload).
+#   - ad-hoc ("-"): fallback when no Developer ID cert is in the keychain.
+# Override with CMUX_STAGING_SIGN_IDENTITY. Nested CLI helpers are signed with
+# the same identity and NO entitlements (the app-level get-task-allow is
+# harmless but pointless on a helper); the app bundle is signed with the minimal
+# get-task-allow entitlements written above.
+if [[ -n "${CMUX_STAGING_SIGN_IDENTITY:-}" ]]; then
+  STAGING_SIGN_IDENTITY="$CMUX_STAGING_SIGN_IDENTITY"
+elif /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
+  STAGING_SIGN_IDENTITY="Developer ID Application"
+else
+  STAGING_SIGN_IDENTITY="-"
+fi
 
 sign_staging_helpers() {
   local helper
   for helper in "$APP_PATH/Contents/Resources/bin"/*; do
     [[ -f "$helper" && -x "$helper" ]] || continue
     /usr/bin/file -b "$helper" | grep -q "Mach-O" || continue
-    /usr/bin/codesign --force --options runtime --timestamp=none --sign - "$helper" >/dev/null 2>&1 || true
+    /usr/bin/codesign --force --options runtime --timestamp=none --sign "$STAGING_SIGN_IDENTITY" "$helper" >/dev/null 2>&1 || true
   done
 }
 
@@ -348,10 +362,10 @@ sign_and_verify_staging_app() {
   local sign_err
   sign_staging_helpers
   if [[ -s "${STAGING_APP_ENT_TMP:-}" ]]; then
-    sign_err="$(/usr/bin/codesign --force --sign - --timestamp=none --generate-entitlement-der --entitlements "$STAGING_APP_ENT_TMP" "$APP_PATH" 2>&1)" \
+    sign_err="$(/usr/bin/codesign --force --sign "$STAGING_SIGN_IDENTITY" --timestamp=none --generate-entitlement-der --entitlements "$STAGING_APP_ENT_TMP" "$APP_PATH" 2>&1)" \
       || { echo "$sign_err" >&2; return 1; }
   else
-    sign_err="$(/usr/bin/codesign --force --sign - --timestamp=none --generate-entitlement-der "$APP_PATH" 2>&1)" \
+    sign_err="$(/usr/bin/codesign --force --sign "$STAGING_SIGN_IDENTITY" --timestamp=none --generate-entitlement-der "$APP_PATH" 2>&1)" \
       || { echo "$sign_err" >&2; return 1; }
   fi
   /usr/bin/codesign --verify --verbose=2 "$APP_PATH" >/dev/null 2>&1
@@ -359,7 +373,11 @@ sign_and_verify_staging_app() {
 
 CMUX_SIGNED_OK=0
 if sign_and_verify_staging_app; then
-  echo "==> Signed staging app ad-hoc (no provisioning profile; never expires)"
+  if [[ "$STAGING_SIGN_IDENTITY" == "-" ]]; then
+    echo "==> Signed staging app ad-hoc (no provisioning profile; never expires)"
+  else
+    echo "==> Signed staging app with '$STAGING_SIGN_IDENTITY' (no provisioning profile; stable identity)"
+  fi
   CMUX_SIGNED_OK=1
 fi
 rm -f "${STAGING_APP_ENT_TMP:-}"
