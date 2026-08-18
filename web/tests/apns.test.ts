@@ -6,6 +6,7 @@ import {
   apnsHostForEnvironment,
   buildApnsPayload,
   CMUX_APNS_CATEGORY,
+  CMUX_APNS_REPLY_CATEGORY,
   shouldPruneToken,
 } from "../services/apns/payload";
 import { resolveApnsProviderConfiguration } from "../services/apns/config";
@@ -76,6 +77,22 @@ describe("apns payload", () => {
     // iOS swipe tell the Mac which notification was dismissed.
     expect(payload.aps.category).toBe(CMUX_APNS_CATEGORY);
     expect(payload.cmux).toEqual({ workspaceId: "ws-1", notificationId: "n-42" });
+  });
+
+  test("selects reply and fallback categories from replyShape", () => {
+    const category = (replyShape: unknown) => {
+      const payload = buildApnsPayload({
+        title: "claude",
+        body: "Agent finished",
+        replyShape,
+      } as Parameters<typeof buildApnsPayload>[0]) as { aps: Record<string, unknown> };
+      return payload.aps.category;
+    };
+
+    expect(category("text")).toBe(CMUX_APNS_REPLY_CATEGORY);
+    expect(category("none")).toBe(CMUX_APNS_CATEGORY);
+    expect(category(undefined)).toBe(CMUX_APNS_CATEGORY);
+    expect(category("unknown")).toBe(CMUX_APNS_CATEGORY);
   });
 
   test("keeps the notification id even when content is hidden (id is not content)", () => {
@@ -458,6 +475,12 @@ describe("apns route policy", () => {
       bundleId: "dev.cmux.ios.push1",
       environment: "sandbox",
     });
+    const maximumDevTag = "a".repeat(64);
+    expect(normalizeApnsBundle(`dev.cmux.ios.${maximumDevTag}`)).toEqual({
+      bundleId: `dev.cmux.ios.${maximumDevTag}`,
+      environment: "sandbox",
+    });
+    expect(normalizeApnsBundle(`dev.cmux.ios.${maximumDevTag}a`)).toBeNull();
 
     expect(normalizeApnsBundle("com.example.app")).toBeNull();
     expect(normalizeApnsBundle("dev.cmux.ios.bad_topic")).toBeNull();
@@ -572,6 +595,19 @@ describe("apns route policy", () => {
         correlationId: "4d02de48-a21d-4ba1-97b5-42e9400ee09b",
       },
     });
+  });
+
+  test("passes through known reply shapes and ignores unknown values", () => {
+    const value = (replyShape: unknown) => {
+      const parsed = parsePushPayload({ title: "agent", body: "done", replyShape });
+      if (!parsed.ok) throw new Error(parsed.error);
+      return parsed.value.replyShape;
+    };
+
+    expect(value("text")).toBe("text");
+    expect(value("none")).toBe("none");
+    expect(value(undefined)).toBeUndefined();
+    expect(value("future-shape")).toBeUndefined();
   });
 
   test("parses a dismiss push: text-free, requires ids, carries the badge", () => {
@@ -1474,8 +1510,8 @@ describe("apns sender transport", () => {
     }
 
     expect(results).toEqual([
-      { deviceToken: "a".repeat(64), status: 200, reason: undefined, prune: false },
-      { deviceToken: "b".repeat(64), status: 200, reason: undefined, prune: false },
+      { deviceToken: "a".repeat(64), bundleId: "dev.cmux.ios.push1", status: 200, reason: undefined, prune: false },
+      { deviceToken: "b".repeat(64), bundleId: "com.cmux.app", status: 200, reason: undefined, prune: false },
     ]);
     expect(closed).toEqual([productionHost, sandboxHost]);
   });
@@ -1861,6 +1897,7 @@ describe("apns sender transport", () => {
     expect(requests).toBe(1);
     expect(accepted).toEqual([{
       deviceToken: target.deviceToken,
+      bundleId: target.bundleId,
       status: 200,
       reason: undefined,
       prune: false,
@@ -1936,8 +1973,8 @@ describe("apns sender transport", () => {
     );
 
     expect(results).toEqual([
-      { deviceToken: "a".repeat(64), status: 0, reason: "connection_error", prune: false },
-      { deviceToken: "b".repeat(64), status: 200, reason: undefined, prune: false },
+      { deviceToken: "a".repeat(64), bundleId: "dev.cmux.ios.push1", status: 0, reason: "connection_error", prune: false },
+      { deviceToken: "b".repeat(64), bundleId: "com.cmux.app", status: 200, reason: undefined, prune: false },
     ]);
     expect(closed).toEqual([productionHost]);
   });
@@ -2000,8 +2037,8 @@ describe("apns sender transport", () => {
     );
 
     expect(results).toEqual([
-      { deviceToken: "a".repeat(64), status: 200, reason: undefined, prune: false },
-      { deviceToken: "b".repeat(64), status: 0, reason: "request failed", prune: false },
+      { deviceToken: "a".repeat(64), bundleId: "com.cmux.app", status: 200, reason: undefined, prune: false },
+      { deviceToken: "b".repeat(64), bundleId: "dev.cmux.app.beta", status: 0, reason: "request failed", prune: false },
     ]);
     expect(closed).toEqual([productionHost]);
   });

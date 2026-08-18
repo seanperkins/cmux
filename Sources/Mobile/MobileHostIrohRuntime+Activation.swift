@@ -1,7 +1,6 @@
 import CMUXMobileCore
 import CmuxAuthRuntime
 import CmuxIrohTransport
-import CryptoKit
 import Foundation
 
 @MainActor
@@ -20,6 +19,11 @@ extension MobileHostIrohRuntime {
             throw CmxIrohHostRuntimeError.inactive
         }
         let tag = Self.currentTag()
+        guard let clientNamespace = CmxIrohMacBundleNamespace(
+            bundleIdentifier: Bundle.main.bundleIdentifier
+        ) else {
+            throw CmxIrohHostRuntimeError.invalidLocalBinding
+        }
         let appInstanceID = try await appInstances.appInstanceID(
             accountID: accountID,
             tag: tag
@@ -39,6 +43,7 @@ extension MobileHostIrohRuntime {
         let bindingMatches = cachedBinding.map {
             $0.deviceID == deviceID
                 && $0.appInstanceID == appInstanceID
+                && $0.clientNamespace == clientNamespace.rawValue
                 && $0.tag == tag
                 && $0.platform == .mac
                 && derivedEndpointID == $0.endpointID
@@ -72,6 +77,7 @@ extension MobileHostIrohRuntime {
             accountID: accountID,
             deviceID: deviceID,
             appInstanceID: appInstanceID,
+            clientNamespace: clientNamespace.rawValue,
             tag: tag,
             endpointID: derivedEndpointID,
             identityGeneration: identity.generation,
@@ -143,6 +149,7 @@ extension MobileHostIrohRuntime {
                     _ = try await auth.forceRefreshAccessToken()
                 }
             ),
+            clientNamespace: clientNamespace.rawValue,
             discoveryScope: try CmxConnectivityDiscoveryScope(
                 deviceID: deviceID,
                 appInstanceID: appInstanceID,
@@ -246,6 +253,7 @@ extension MobileHostIrohRuntime {
             accountID: accountID,
             deviceID: deviceID,
             appInstanceID: appInstanceID,
+            clientNamespace: clientNamespace,
             tag: tag,
             displayName: MobileHostIdentity.instanceDisplayName(),
             identity: identity,
@@ -634,17 +642,5 @@ extension MobileHostIrohRuntime {
             && !signOutIntentActive
             && desiredActive
             && observedAccountID == accountID
-    }
-}
-
-private extension CmxIrohIdentityMaterial {
-    var peerIdentity: CmxIrohPeerIdentity? {
-        guard let privateKey = try? Curve25519.Signing.PrivateKey(
-            rawRepresentation: secretKey.bytes
-        ) else { return nil }
-        let endpointID = privateKey.publicKey.rawRepresentation
-            .map { String(format: "%02x", $0) }
-            .joined()
-        return try? CmxIrohPeerIdentity(endpointID: endpointID)
     }
 }

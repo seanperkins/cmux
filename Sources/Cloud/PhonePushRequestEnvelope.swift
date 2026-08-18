@@ -21,6 +21,8 @@ struct PhonePushRequestEnvelope: Codable, Equatable, Sendable,
     let coalescingID: String?
     let expectedAccountID: String?
     let expectedSessionGeneration: UInt64?
+    /// Exact iOS bundle identifier selected when this event was queued.
+    let targetBundleIdentifier: String?
 
     init(
         correlationID: String,
@@ -28,7 +30,8 @@ struct PhonePushRequestEnvelope: Codable, Equatable, Sendable,
         body: Data,
         coalescingID: String? = nil,
         expectedAccountID: String? = nil,
-        expectedSessionGeneration: UInt64? = nil
+        expectedSessionGeneration: UInt64? = nil,
+        targetBundleIdentifier: String? = nil
     ) {
         self.correlationID = correlationID.lowercased()
         self.expirationEpochSeconds = expirationEpochSeconds
@@ -36,6 +39,7 @@ struct PhonePushRequestEnvelope: Codable, Equatable, Sendable,
         self.coalescingID = coalescingID
         self.expectedAccountID = expectedAccountID
         self.expectedSessionGeneration = expectedSessionGeneration
+        self.targetBundleIdentifier = targetBundleIdentifier
     }
 
     init(
@@ -43,7 +47,8 @@ struct PhonePushRequestEnvelope: Codable, Equatable, Sendable,
         correlationID: UUID = UUID(),
         expirationEpochSeconds: Int,
         expectedAccountID: String? = nil,
-        expectedSessionGeneration: UInt64? = nil
+        expectedSessionGeneration: UInt64? = nil,
+        targetBundleIdentifier: String? = nil
     ) throws {
         let canonicalCorrelation = correlationID.uuidString.lowercased()
         let normalizedNotificationID = payload.kind == .notify
@@ -81,6 +86,8 @@ struct PhonePushRequestEnvelope: Codable, Equatable, Sendable,
                 )
             object["retargetsToLiveSurfaceOwner"] =
                 payload.retargetsToLiveSurfaceOwner
+            // Reply shape is a schema enum, not content: safe under hideContent.
+            object["replyShape"] = payload.replyShape
             if let value = try Self.boundedIdentifier(payload.workspaceId) {
                 object["workspaceId"] = value
             }
@@ -113,7 +120,8 @@ struct PhonePushRequestEnvelope: Codable, Equatable, Sendable,
             body: encoded,
             coalescingID: normalizedNotificationID,
             expectedAccountID: expectedAccountID,
-            expectedSessionGeneration: expectedSessionGeneration
+            expectedSessionGeneration: expectedSessionGeneration,
+            targetBundleIdentifier: targetBundleIdentifier
         )
     }
 
@@ -134,7 +142,8 @@ struct PhonePushRequestEnvelope: Codable, Equatable, Sendable,
             body: body,
             coalescingID: coalescingID,
             expectedAccountID: accountID,
-            expectedSessionGeneration: generation
+            expectedSessionGeneration: generation,
+            targetBundleIdentifier: targetBundleIdentifier
         )
     }
 
