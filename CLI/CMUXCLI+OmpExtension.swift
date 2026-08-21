@@ -101,6 +101,8 @@ function eventName(subcommand: string): string {
       return "UserPromptSubmit";
     case "stop":
       return "Stop";
+    case "notification":
+      return "Notification";
     default:
       return subcommand;
   }
@@ -218,6 +220,13 @@ interface QueuedHook {
 function hookPriority(subcommand: string): number {
   switch (subcommand) {
     case "stop":
+      return 2;
+    case "notification":
+    case "approval-response":
+      // The approval pair outranks queue churn: dropping the request strands
+      // the pane on Running while the agent blocks on the user, and dropping
+      // the response leaves the bell ringing after it was answered. Nothing
+      // else replays either one.
       return 2;
     case "session-start":
       return 1;
@@ -377,13 +386,58 @@ export default function cmuxOmpSessionExtension(api: ExtensionAPI) {
   api.on("session_switch", adoptSwitchedSession);
   api.on("session_branch", adoptSwitchedSession);
 
+  // OMP fires before_agent_start only for a user-submitted prompt, so a loop
+  // that starts from a delivered background-job result, a queued/steering
+  // message, or a session_stop continuation reaches agent_start with no
+  // prompt-submit behind it — and the pane keeps the Idle status the previous
+  // agent_end set while the agent is visibly working. agent_start covers only
+  // that promptless case: a normal turn must still deliver exactly one
+  // prompt-submit, the one carrying prompt text for cmux auto-naming.
+  let promptSubmitPending = false;
+
   api.on("before_agent_start", async (event, ctx) => {
     if (!isOwnerContext(ctx)) return;
+    promptSubmitPending = true;
     await sendHook("prompt-submit", ctx, { prompt: boundedHookText(event.prompt) });
+  });
+
+  api.on("agent_start", async (_event, ctx) => {
+    if (!isOwnerContext(ctx)) return;
+    if (promptSubmitPending) {
+      promptSubmitPending = false;
+      return;
+    }
+    await sendHook("prompt-submit", ctx);
+  });
+
+  // A tool waiting on approval is the one state the pane cannot infer from the
+  // lifecycle: the agent is neither running nor idle, it is blocked on the
+  // user. cmux classifies notification bodies by keyword, and
+  // "approval"/"permission" is what routes to needsInput + the bell pill
+  // (AgentHookNotificationClassifier.classify).
+  api.on("tool_approval_requested", async (event, ctx) => {
+    if (!isOwnerContext(ctx)) return;
+    const toolName = firstString((event as { toolName?: unknown }).toolName) || "a tool";
+    await sendHook("notification", ctx, {
+      message: `Approval needed: ${toolName}`,
+      notification: { type: "permission" },
+    });
+  });
+
+  api.on("tool_approval_resolved", async (_event, ctx) => {
+    if (!isOwnerContext(ctx)) return;
+    // approval-response, not prompt-submit: a mid-turn prompt-submit is
+    // classified as a nested prompt and has its visible mutations suppressed,
+    // so the bell would outlive the answered prompt. approval-response is the
+    // dedicated clear — it resolves the notification and restores Running.
+    await sendHook("approval-response", ctx);
   });
 
   api.on("agent_end", async (event, ctx) => {
     if (!isOwnerContext(ctx)) return;
+    // An aborted turn can settle without ever reaching agent_start; leaving the
+    // flag armed would swallow the next continuation's re-arm.
+    promptSubmitPending = false;
     // OMP emits agent_end as the universal terminal settle. willContinue marks
     // a scheduled automatic continuation (auto-retry, queued messages,
     // session_stop continuations, background jobs), so the turn is still
